@@ -11,7 +11,7 @@
 import pandas as pd
 import time
 from pathlib import Path
-from download_curves import download_from_csv
+from download_curves import download_from_csv, download_from_csv_parallel
 from dataset_builder import DatasetBuilder
 from utils.merge_downloaded_curves import read_and_merge_curves
 
@@ -64,7 +64,7 @@ def download_catalogs():
     print("[⬇] Descargando catálogo TESS EB...")
     df_tess = pd.read_csv(TESS_EB_URL)
     df_tess = df_tess.rename(columns={"TIC ID": "TIC_ID"})
-    df_tess["id"] = df_tess["TIC_ID"]
+    df_tess["id"] = df_tess["tess_id"]
     df_tess["mission"] = "TESS"
     df_tess["clase_variable"] = "EB"
     df_tess.to_csv(CATALOG_DIR / "tess_eb.csv", index=False)
@@ -104,7 +104,8 @@ def main(use_sample=True):
 
     # Paso 3: descarga de curvas
     print("[⬇] Descargando curvas de luz...")
-    download_from_csv(LIST_IDS, base_output_dir=RAW_DIR)
+    #download_from_csv(LIST_IDS, base_output_dir=RAW_DIR)
+    download_from_csv_parallel(LIST_IDS, base_output_dir=RAW_DIR, max_workers=16)
 
     # Paso 4: lectura y fusión de las curvas descargadas
     print("[⭢] Leyendo y fusionando curvas descargadas...")

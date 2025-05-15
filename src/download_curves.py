@@ -3,6 +3,7 @@ import pandas as pd
 from lightkurve import search_lightcurve
 from datetime import datetime
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def normalize_id(star_id, mission):
     if star_id.isdigit():
@@ -96,3 +97,42 @@ def download_from_csv(csv_path, base_output_dir="data"):
         mission = row['mission'].strip()
         out_dir = os.path.join(base_output_dir, mission.lower())
         download_curve(star_id, mission, out_dir)
+
+def download_from_csv_parallel(csv_path, base_output_dir="data", max_workers=8):
+    """
+    Descarga curvas de luz en paralelo usando múltiples hilos.
+    Respeta los archivos ya descargados.
+    """
+    df = pd.read_csv(csv_path)
+    total = len(df)
+    print(f"[⬇] Descargando {total} curvas en paralelo con {max_workers} hilos...")
+
+    def process_row(row):
+        try:
+            from download_curves import download_curve  # evitar problemas de import circular
+            star_id = str(row["id"]).strip()
+            mission = row["mission"].strip()
+            out_dir = os.path.join(base_output_dir, mission.lower())
+            download_curve(star_id, mission, out_dir)
+            return star_id, "OK"
+        except Exception as e:
+            return star_id, f"Error: {e}"
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(process_row, row): row["id"]
+            for _, row in df.iterrows()
+        }
+
+        results = []
+        for future in tqdm(as_completed(futures), total=total, desc="🚀 Descargando curvas"):
+            result = future.result()
+            results.append(result)
+
+    errors = [r for r in results if "Error" in r[1]]
+    print(f"[✓] Descarga finalizada. Éxitos: {len(results)-len(errors)}  Errores: {len(errors)}")
+
+    if errors:
+        print("⚠️ Errores encontrados:")
+        for star_id, err in errors[:10]:  # muestra solo los 10 primeros
+            print(f" - {star_id}: {err}")

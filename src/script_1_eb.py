@@ -37,7 +37,7 @@ def download_sample_catalogs():
 
     print("[⬇] Descargando catálogo reducido de TESS EB para pruebas...")
     df_tess = pd.read_csv(SAMPLE_CATALOG_DIR / "tess_eb_sample.csv")
-    df_tess["id"] = df_tess["TIC_ID"]
+    df_tess["id"] = df_tess["tess_id"]
     df_tess["mission"] = "TESS"
     df_tess["clase_variable"] = "EB"
     df_tess.to_csv(CATALOG_DIR / "tess_eb.csv", index=False)

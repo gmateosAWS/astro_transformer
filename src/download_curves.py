@@ -108,15 +108,17 @@ def download_from_csv_parallel(csv_path, base_output_dir="data", max_workers=8):
     print(f"[⬇] Descargando {total} curvas en paralelo con {max_workers} hilos...")
 
     def process_row(row):
+        from download_curves import download_curve
+        star_id = str(row["id"]).strip()
+        mission = row["mission"].strip()
+        out_dir = os.path.join(base_output_dir, mission.lower())
         try:
-            from download_curves import download_curve  # evitar problemas de import circular
-            star_id = str(row["id"]).strip()
-            mission = row["mission"].strip()
-            out_dir = os.path.join(base_output_dir, mission.lower())
+            print(f"⬇ Iniciando descarga: {star_id} ({mission})")
             download_curve(star_id, mission, out_dir)
             return star_id, "OK"
         except Exception as e:
-            return star_id, f"Error: {e}"
+            print(f"❌ Error con {star_id} ({mission}): {e}")
+            raise  # <-- permite detener el hilo si quieres depurar duro
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {

@@ -14,6 +14,11 @@ from pathlib import Path
 from download_curves import download_from_csv, download_from_csv_parallel
 from dataset_builder import DatasetBuilder
 from utils.merge_downloaded_curves import read_and_merge_curves
+import logging
+
+logging.getLogger("lightkurve").setLevel(logging.ERROR)
+logging.getLogger("astropy").setLevel(logging.ERROR)
+
 
 # URLs de los catálogos de Kepler y TESS
 # La URL de Kepler devuelve error por lo que se descarga el CSV local

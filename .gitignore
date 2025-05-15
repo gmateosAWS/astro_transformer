@@ -6,6 +6,26 @@ __pycache__/
 # C extensions
 *.so
 
+# Ignorar checkpoints de Jupyter
+**/.ipynb_checkpoints/
+
+# Archivos temporales comunes
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Entornos virtuales locales
+.venv/
+env/
+venv/
+
+# Archivos de sistema (VSCode, macOS, etc.)
+.vscode/
+.DS_Store
+Thumbs.db
+
+
 # Distribution / packaging
 .Python
 build/
@@ -172,3 +192,16 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Archivos derivados de descargas y procesamiento
+data/raw/
+data/processed/
+
+# Listas de trabajo generadas automáticamente
+data/lists/
+data/lists/*.csv
+# Mantenemos los archivos de muestra para pruebas
+!data/lists/*_ids_sample.csv
+
+# Parquets y outputs
+*.parquet

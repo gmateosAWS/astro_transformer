@@ -17,7 +17,7 @@ from utils.merge_downloaded_curves import read_and_merge_curves
 
 # URLs de los catálogos de Kepler y TESS
 KEPLER_EB_URL = "https://keplerebs.villanova.edu/data/kep_eclipsing_binary_catalog.csv"
-TESS_EB_URL = "https://archive.stsci.edu/missions/hlsp/tess-ebs/catalog/tess_eb_catalog_v1.csv"
+TESS_EB_URL = "https://archive.stsci.edu/hlsps/tess-ebs/hlsp_tess-ebs_tess_lcf-ffi_s0001-s0026_tess_v1.0_cat.csv"
 
 CATALOG_DIR = Path("catalogs")
 SAMPLE_CATALOG_DIR = Path("catalogs/samples")
@@ -47,6 +47,13 @@ def download_catalogs():
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
 
     print("[⬇] Descargando catálogo Kepler EB...")
+    LOCAL_KEPLER_CSV = Path(CATALOG_DIR / "kepler_eb_local.csv")    
+    if LOCAL_KEPLER_CSV.exists():
+        print("[📂] Cargando catálogo Kepler EB desde copia local...")
+        df_kepler = pd.read_csv(LOCAL_KEPLER_CSV)
+    else:
+        print("[⬇] Descargando catálogo Kepler EB...")
+        df_kepler = pd.read_csv(KEPLER_EB_URL)    
     df_kepler = pd.read_csv(KEPLER_EB_URL)
     df_kepler = df_kepler.rename(columns={"kepid": "KIC"})
     df_kepler["id"] = df_kepler["KIC"]

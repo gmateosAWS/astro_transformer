@@ -50,7 +50,7 @@ def download_catalogs():
     LOCAL_KEPLER_CSV = Path(CATALOG_DIR / "kepler_eb_local.csv")    
     if LOCAL_KEPLER_CSV.exists():
         print("[📂] Cargando catálogo Kepler EB desde copia local...")
-        df_kepler = pd.read_csv(LOCAL_KEPLER_CSV)
+        df_kepler = pd.read_csv(LOCAL_KEPLER_CSV, comment="#")
     else:
         print("[⬇] Descargando catálogo Kepler EB...")
         df_kepler = pd.read_csv(KEPLER_EB_URL)    

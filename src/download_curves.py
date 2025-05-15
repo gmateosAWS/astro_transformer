@@ -84,7 +84,7 @@ def download_curve(target_id, mission, output_dir):
 
             if os.path.exists(path):
                 print(f"🟡 Ya existe: {path}. Se omite.")
-                continue
+                return  # ← salimos directamente para no continuar procesando esta curva
 
             lc_clean.to_csv(path)
             print(f"✅ Guardado: {path}")

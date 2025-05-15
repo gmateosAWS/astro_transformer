@@ -16,6 +16,7 @@ from dataset_builder import DatasetBuilder
 from utils.merge_downloaded_curves import read_and_merge_curves
 
 # URLs de los catálogos de Kepler y TESS
+# La URL de Kepler devuelve error por lo que se descarga el CSV local
 KEPLER_EB_URL = "https://keplerebs.villanova.edu/data/kep_eclipsing_binary_catalog.csv"
 TESS_EB_URL = "https://archive.stsci.edu/hlsps/tess-ebs/hlsp_tess-ebs_tess_lcf-ffi_s0001-s0026_tess_v1.0_cat.csv"
 

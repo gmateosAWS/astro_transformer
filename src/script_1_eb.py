@@ -19,6 +19,16 @@ import logging
 logging.getLogger("lightkurve").setLevel(logging.ERROR)
 logging.getLogger("astropy").setLevel(logging.ERROR)
 
+import urllib3
+urllib3.util.connection.HAS_IPV6 = False  # previene ciertos timeouts
+
+from requests.adapters import HTTPAdapter
+from requests.sessions import Session
+
+session = Session()
+adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+session.mount("https://", adapter)
+session.mount("http://", adapter)
 
 # URLs de los catálogos de Kepler y TESS
 # La URL de Kepler devuelve error por lo que se descarga el CSV local
@@ -33,14 +43,14 @@ LIST_IDS = Path("data/lists/eb_ids.csv")
 OUTPUT_FILE = "dataset_eb"
 
 def download_sample_catalogs():
-    print("[⬇] Descargando catálogo reducido de Kepler EB para pruebas...")
+    print("[⬇] Descargando catálogo reducido de Kepler EB para pruebas...", flush=True)
     df_kepler = pd.read_csv(SAMPLE_CATALOG_DIR / "kepler_eb_sample.csv")
     df_kepler["id"] = df_kepler["KIC"]
     df_kepler["mission"] = "Kepler"
     df_kepler["clase_variable"] = "EB"
     df_kepler.to_csv(CATALOG_DIR / "kepler_eb.csv", index=False)
 
-    print("[⬇] Descargando catálogo reducido de TESS EB para pruebas...")
+    print("[⬇] Descargando catálogo reducido de TESS EB para pruebas...", flush=True)
     df_tess = pd.read_csv(SAMPLE_CATALOG_DIR / "tess_eb_sample.csv")
     df_tess["id"] = df_tess["tess_id"]
     df_tess["mission"] = "TESS"
@@ -52,13 +62,13 @@ def download_sample_catalogs():
 def download_catalogs():
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("[⬇] Descargando catálogo Kepler EB...")
+    print("[⬇] Descargando catálogo Kepler EB...", flush=True)
     LOCAL_KEPLER_CSV = Path(CATALOG_DIR / "kepler_eb_local.csv")    
     if LOCAL_KEPLER_CSV.exists():
-        print("[📂] Cargando catálogo Kepler EB desde copia local...")
+        print("[📂] Cargando catálogo Kepler EB desde copia local...", flush=True)
         df_kepler = pd.read_csv(LOCAL_KEPLER_CSV, comment="#")
     else:
-        print("[⬇] Descargando catálogo Kepler EB...")
+        print("[⬇] Descargando catálogo Kepler EB...", flush=True)
         df_kepler = pd.read_csv(KEPLER_EB_URL)    
     df_kepler = df_kepler.rename(columns={"kepid": "KIC"})
     df_kepler["id"] = df_kepler["KIC"]
@@ -66,7 +76,7 @@ def download_catalogs():
     df_kepler["clase_variable"] = "EB"
     df_kepler.to_csv(CATALOG_DIR / "kepler_eb.csv", index=False)
 
-    print("[⬇] Descargando catálogo TESS EB...")
+    print("[⬇] Descargando catálogo TESS EB...", flush=True)
     df_tess = pd.read_csv(TESS_EB_URL)
     df_tess = df_tess.rename(columns={"TIC ID": "TIC_ID"})
     df_tess["id"] = df_tess["tess_id"]
@@ -97,42 +107,42 @@ def main(use_sample=True):
 
     # Paso 1: descarga de los catálogos de Kepler y TESS
     if use_sample:
-        print("[⬇] Descargando catálogos de pruebas de Kepler y TESS...")
+        print("[⬇] Descargando catálogos de pruebas de Kepler y TESS...", flush=True)
         df_kepler, df_tess = download_sample_catalogs()
     else:
-        print("[⬇] Descargando catálogos completos de Kepler y TESS...")
+        print("[⬇] Descargando catálogos completos de Kepler y TESS...", flush=True)
         df_kepler, df_tess = download_catalogs()
 
     # Paso 2: generar CSV de entrada para el downloader
-    print("[⬇] Generando CSV de entrada para descarga de curvas...")
+    print("[⬇] Generando CSV de entrada para descarga de curvas...", flush=True)
     df_ids = generar_csv_descarga(df_kepler, df_tess)
 
     # Paso 3: descarga de curvas
-    print("[⬇] Descargando curvas de luz...")
+    print("[⬇] Descargando curvas de luz...", flush=True)
     #download_from_csv(LIST_IDS, base_output_dir=RAW_DIR)
-    download_from_csv_parallel(LIST_IDS, base_output_dir=RAW_DIR, max_workers=16)
+    download_from_csv_parallel(LIST_IDS, base_output_dir=RAW_DIR, max_workers=7)
 
     # Paso 4: lectura y fusión de las curvas descargadas
-    print("[⭢] Leyendo y fusionando curvas descargadas...")
+    print("[⭢] Leyendo y fusionando curvas descargadas...", flush=True)
     df_curvas = read_and_merge_curves(RAW_DIR)
 
     # Paso 5: merge de metadatos (etiquetas)
-    print("[⭢] Fusionando metadatos (etiquetas)...")
+    print("[⭢] Fusionando metadatos (etiquetas)...", flush=True)
     df_ids["id"] = df_ids["id"].astype(str)
     df_curvas["id_objeto"] = df_curvas["id_objeto"].astype(str)
     df_merged = df_curvas.merge(df_ids, left_on=["id_objeto", "mision"], right_on=["id", "mission"], how="left")
     df_merged["origen_etiqueta"] = "EB-catalog"
     df_merged["clase_variable"] = df_merged["clase_variable"].fillna("Unknown")
 
-    print(f"[✓] Curvas unificadas: {df_merged['id_objeto'].nunique()} estrellas")
-    print(f"[✓] Total de filas: {len(df_merged):,}")
+    print(f"[✓] Curvas unificadas: {df_merged['id_objeto'].nunique()} estrellas", flush=True)
+    print(f"[✓] Total de filas: {len(df_merged):,}", flush=True)
 
     # Paso 6: guardar dataset final
     builder = DatasetBuilder(base_dir=PROCESSED_DIR)
     builder.add_source("EB", df_merged, "clase_variable", "EB-catalog")
     builder.save(df_merged, OUTPUT_FILE, format="parquet")
 
-    print(f"[⏱] Tiempo total: {time.perf_counter() - t0:.2f} segundos")
+    print(f"[⏱] Tiempo total: {time.perf_counter() - t0:.2f} segundos", flush=True)
 
 if __name__ == "__main__":
     # Cambia a False cuando lo ejecutes en SageMaker

@@ -47,7 +47,9 @@ def download_curve(target_id, mission, output_dir):
 
         # Iterar sobre los archivos de curva de luz y guardar el flujo PDCSAP_FLUX en CSV
         print(f"[🌓] {star_id} → {len(lcs)} curvas encontradas")
-        for i, lc in tqdm(enumerate(lcs), total=len(lcs), desc=f"  ↪ Procesando {star_id}", leave=False):
+        #for i, lc in tqdm(enumerate(lcs), total=len(lcs), desc=f"  ↪ Procesando {star_id}", leave=False):
+        for i, lc in enumerate(lcs):
+            print(f"↪ [{star_id}] Procesando curva {i+1}/{len(lcs)}")            
             # Usar solo curvas etiquetadas como PDCSAP_FLUX si están disponibles
             # PDCSAP_FLUX (Presearch Data Conditioning Simple Aperture Photometry):
             #   Es el producto más limpio y corregido que ofrece Kepler/TESS.
@@ -88,6 +90,7 @@ def download_curve(target_id, mission, output_dir):
             print(f"✅ Guardado: {path}")
     except Exception as e:
         print(f"❌ Error descargando {star_id} ({mission}): {e}")
+        #raise  # ← dejar que explote si estás depurando
 
 def download_from_csv(csv_path, base_output_dir="data"):
     df = pd.read_csv(csv_path)
@@ -108,33 +111,18 @@ def download_from_csv_parallel(csv_path, base_output_dir="data", max_workers=8):
     print(f"[⬇] Descargando {total} curvas en paralelo con {max_workers} hilos...")
 
     def process_row(row):
-        from download_curves import download_curve
         star_id = str(row["id"]).strip()
         mission = row["mission"].strip()
         out_dir = os.path.join(base_output_dir, mission.lower())
-        try:
-            print(f"⬇ Iniciando descarga: {star_id} ({mission})")
-            download_curve(star_id, mission, out_dir)
-            return star_id, "OK"
-        except Exception as e:
-            print(f"❌ Error con {star_id} ({mission}): {e}")
-            raise  # <-- permite detener el hilo si quieres depurar duro
+        print(f"⬇ Iniciando descarga: {star_id} ({mission})")
+        download_curve(star_id, mission, out_dir)
+        return star_id, "OK"
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(process_row, row): row["id"]
-            for _, row in df.iterrows()
-        }
+        results = list(tqdm(
+            executor.map(process_row, [row for _, row in df.iterrows()]),
+            total=total,
+            desc="🚀 Descargando curvas"
+        ))
 
-        results = []
-        for future in tqdm(as_completed(futures), total=total, desc="🚀 Descargando curvas"):
-            result = future.result()
-            results.append(result)
-
-    errors = [r for r in results if "Error" in r[1]]
-    print(f"[✓] Descarga finalizada. Éxitos: {len(results)-len(errors)}  Errores: {len(errors)}")
-
-    if errors:
-        print("⚠️ Errores encontrados:")
-        for star_id, err in errors[:10]:  # muestra solo los 10 primeros
-            print(f" - {star_id}: {err}")
+    print(f"[✔] Descarga finalizada: {len(results)} objetos procesados.")

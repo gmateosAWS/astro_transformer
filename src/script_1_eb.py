@@ -55,7 +55,6 @@ def download_catalogs():
     else:
         print("[⬇] Descargando catálogo Kepler EB...")
         df_kepler = pd.read_csv(KEPLER_EB_URL)    
-    df_kepler = pd.read_csv(KEPLER_EB_URL)
     df_kepler = df_kepler.rename(columns={"kepid": "KIC"})
     df_kepler["id"] = df_kepler["KIC"]
     df_kepler["mission"] = "Kepler"

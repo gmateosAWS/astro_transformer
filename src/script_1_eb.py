@@ -72,9 +72,19 @@ def download_catalogs():
     return df_kepler, df_tess
 
 def generar_csv_descarga(df_kepler, df_tess):
+    """
+    Une los dataframes de Kepler y TESS con columnas estándar y genera
+    un CSV de entrada para la descarga de curvas.
+    Asegura que 'clase_variable' esté presente en el archivo final.
+    """
     df_total = pd.concat([df_kepler, df_tess], ignore_index=True)
+
+    # Forzar columna 'clase_variable' si no estaba en los catálogos cargados
+    if "clase_variable" not in df_total.columns:
+        df_total["clase_variable"] = "EB"
+
     LIST_IDS.parent.mkdir(parents=True, exist_ok=True)
-    df_total[["id", "mission"]].to_csv(LIST_IDS, index=False)
+    df_total[["id", "mission", "clase_variable"]].to_csv(LIST_IDS, index=False)
     return df_total
 
 def main(use_sample=True):

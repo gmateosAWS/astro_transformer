@@ -205,3 +205,6 @@ data/lists/*.csv
 
 # Parquets y outputs
 *.parquet
+check_progress.ipynb
+check_progress.ipynb
+check_progress.ipynb

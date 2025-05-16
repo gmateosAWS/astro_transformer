@@ -138,9 +138,9 @@ def download_from_csv_parallel(csv_path, base_output_dir="data", max_workers=8):
     print(f"[⬇] Descargando {total} curvas en paralelo con {max_workers} hilos...", flush=True)
 
     def already_downloaded(star_id, mission, output_dir):
-        pattern = Path(output_dir) / mission.lower() / f"{mission.lower()}_{star_id}_*.csv"
-        return any(Path().glob(str(pattern)))
-
+        pattern_dir = Path(output_dir) / mission.lower()
+        return any(pattern_dir.glob(f"{mission.lower()}_{star_id}_*.csv"))
+    
     def run_download_curve(star_id, mission, out_dir, result_dict):
         try:
             download_curve(star_id, mission, out_dir)

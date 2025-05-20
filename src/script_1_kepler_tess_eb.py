@@ -11,8 +11,8 @@
 import pandas as pd
 import time
 from pathlib import Path
-from download_curves import download_from_csv, download_from_csv_parallel
-from dataset_builder import DatasetBuilder
+from utils.download_curves import download_from_csv, download_from_csv_parallel
+from utils.dataset_builder import DatasetBuilder
 from utils.merge_downloaded_curves import read_and_merge_curves
 import logging
 import glob
@@ -174,19 +174,19 @@ def main(mission="ALL", only_pending=True, max_workers=8, use_sample=False):
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     if mission.upper() == "KEPLER":
         #df_curvas = read_and_merge_curves(RAW_DIR / "kepler", batch_size=500)
-        read_and_merge_curves(RAW_DIR / "kepler", output_path=PROCESSED_DIR / "dataset_eb_kepler.parquet")
+        read_and_merge_curves(RAW_DIR / "kepler", output_path=PROCESSED_DIR / "dataset_eb_kepler.parquet", df_catalog=df_kepler)
         #df_ids = df_kepler.copy()
         #output_file = "dataset_eb_kepler.parquet"
     elif mission.upper() == "TESS":
         #df_curvas = read_and_merge_curves(RAW_DIR / "tess", batch_size=500)
-        read_and_merge_curves(RAW_DIR / "tess", output_path=PROCESSED_DIR / "dataset_eb_tess.parquet")        
+        read_and_merge_curves(RAW_DIR / "tess", output_path=PROCESSED_DIR / "dataset_eb_tess.parquet", df_catalog=df_tess)
         #df_ids = df_tess.copy()
         #output_file = "dataset_eb_tess.parquet"
     else:
         #df_curvas_k = read_and_merge_curves(RAW_DIR / "kepler", batch_size=500)
         #df_curvas_t = read_and_merge_curves(RAW_DIR / "tess", batch_size=500)
-        read_and_merge_curves(RAW_DIR / "kepler", output_path=PROCESSED_DIR / "dataset_eb_kepler.parquet")
-        read_and_merge_curves(RAW_DIR / "tess", output_path=PROCESSED_DIR / "dataset_eb_tess.parquet")        
+        read_and_merge_curves(RAW_DIR / "kepler", output_path=PROCESSED_DIR / "dataset_eb_kepler.parquet", df_catalog=df_kepler)
+        read_and_merge_curves(RAW_DIR / "tess", output_path=PROCESSED_DIR / "dataset_eb_tess.parquet", df_catalog=df_tess)
         #df_curvas = pd.concat([df_curvas_k, df_curvas_t], ignore_index=True)
         #df_ids = pd.concat([df_kepler, df_tess], ignore_index=True)
         #output_file = "dataset_eb.parquet"

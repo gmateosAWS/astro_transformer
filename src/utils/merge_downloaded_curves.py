@@ -7,8 +7,7 @@ import shutil
 import pyarrow.parquet as pq
 import pyarrow as pa
 
-
-def read_and_merge_curves(data_dir: Path, output_path: Path, batch_size: int = 500):
+def read_and_merge_curves(data_dir: Path, output_path: Path, df_catalog: pd.DataFrame, batch_size: int = 500):
     """
     Lee archivos CSV de curvas de luz en lotes y construye un fichero Parquet final de forma eficiente.
     Si ya existen ficheros Parquet temporales previos, los reutiliza directamente.
@@ -57,6 +56,10 @@ def read_and_merge_curves(data_dir: Path, output_path: Path, batch_size: int = 5
         # Guardar último lote si queda algo
         if batch_rows:
             df_batch = pd.concat(batch_rows, ignore_index=True)
+            df_batch["id_objeto"] = df_batch["id_objeto"].astype(str)
+            df_batch = df_batch.merge(df_catalog[["id", "clase_variable"]],
+                                      left_on="id_objeto", right_on="id", how="left")
+            df_batch["clase_variable"] = df_batch["clase_variable"].fillna("Unknown")
             batch_file = temp_dir / f"batch_{batch_index:03d}.parquet"
             df_batch.to_parquet(batch_file, index=False)
 

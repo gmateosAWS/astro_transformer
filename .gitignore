@@ -208,3 +208,8 @@ data/lists/*.csv
 check_progress.ipynb
 check_progress.ipynb
 check_progress.ipynb
+
+# Archivos de salida de procesamiento
+backups/*
+outputs/*
+

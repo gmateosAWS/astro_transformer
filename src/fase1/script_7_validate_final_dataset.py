@@ -13,12 +13,18 @@ warnings.filterwarnings("ignore")
 sns.set(style="whitegrid")
 
 # Configuración
-DATASET_PATH = Path("data/processed/all_missions_labeled.parquet")
-
-print(f"📂 Validando: {DATASET_PATH.name}\n")
-
+DATASET_PATHS = [
+    "data/processed/all_missions_labeled.parquet",
+    "data/processed/dataset_gaia_complemented_normalized.parquet"
+]
 # Dataset streaming por lotes
-dataset = ds.dataset(str(DATASET_PATH), format="parquet")
+dataset = ds.dataset(DATASET_PATHS, format="parquet")
+
+print("📂 Validando los siguientes archivos:")
+for path in DATASET_PATHS:
+    print(f"- {path}")
+print()
+
 schema = dataset.schema
 
 # Esquema

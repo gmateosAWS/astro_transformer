@@ -213,3 +213,8 @@ check_progress.ipynb
 backups/*
 outputs/*
 data/train/*
+
+src/fase2/backups/
+
+# Proyecto Astroconfonformer completo
+Astroconformer/

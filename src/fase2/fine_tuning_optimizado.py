@@ -10,7 +10,7 @@ import os
 import pickle
 import numpy as np
 from tqdm.notebook import trange
-
+import pandas as pd
 from Astroconformer.Astroconformer.Model.models import Astroconformer as AstroConformer
 
 class AstroConformerClassifier(nn.Module):
@@ -56,12 +56,16 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     class_names = list(label_encoder.keys())
 
     args = argparse.Namespace(
-        input_dim=1, in_channels=1, encoder_dim=128, hidden_dim=128,
-        output_dim=num_classes, num_heads=8, num_layers=5,
-        dropout=0.3, dropout_p=0.3, stride=20, kernel_size=3,
+        input_dim=1, in_channels=1,
+        encoder_dim=192,          # ← antes 128
+        hidden_dim=256,           # ← antes 128
+        output_dim=num_classes,
+        num_heads=8, num_layers=6,  # ← antes 5
+        dropout=0.3, dropout_p=0.3,
+        stride=20, kernel_size=3,
         norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
         timeshift=False, device=device
-    )
+    )    
 
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=False).to(device)
     model.load_state_dict(torch.load("outputs/mejor_modelo_optimizado.pt"))
@@ -145,6 +149,21 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     plt.savefig("outputs/matriz_confusion_finetuning_optimizado.png")
     plt.show()
 
+    # Guardar errores mal clasificados
+    errores = []
+    for idx, (pred, true) in enumerate(zip(val_preds, val_true)):
+        if pred != true:
+            errores.append({
+                "indice": idx,
+                "clase_real": class_names[true],
+                "clase_predicha": class_names[pred]
+            })
+    
+    df_errores = pd.DataFrame(errores)
+    df_errores.to_csv("outputs/errores_mal_clasificados.csv", index=False)
+    print("💾 Guardado CSV con errores: outputs/errores_mal_clasificados.csv")
+
+    
     if debug:
         print("🛑 Debug activo: fine-tuning detenido tras primera época.")
 

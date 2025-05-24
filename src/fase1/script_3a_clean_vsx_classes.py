@@ -6,10 +6,15 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import re
 
-INPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled.parquet"
-OUTPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled_clean.parquet"
-SUMMARY_CSV = "data/processed/summary/dataset_vsx_tic_labeled_clean_summary.csv"
-SUMMARY_TXT = "data/processed/summary/dataset_vsx_tic_labeled_clean_summary_info.txt"
+# INPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled.parquet"
+# OUTPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled_clean.parquet"
+# SUMMARY_CSV = "data/processed/summary/dataset_vsx_tic_labeled_clean_summary.csv"
+# SUMMARY_TXT = "data/processed/summary/dataset_vsx_tic_labeled_clean_summary_info.txt"
+
+INPUT_PARQUET = "data/processed/dataset_gaia_dr3_vsx_tic_labeled_with_coords.parquet"
+OUTPUT_PARQUET = "data/processed/dataset_gaia_dr3_vsx_tic_labeled_with_coords_clean.parquet"
+SUMMARY_CSV = "data/processed/summary/dataset_gaia_dr3_vsx_tic_labeled_with_coords_clean_summary.csv"
+SUMMARY_TXT = "data/processed/summary/dataset_gaia_dr3_vsx_tic_labeled_with_coords_clean_summary_info.txt"
 
 # Diccionario de agrupación extendido
 AGRUPACION = {

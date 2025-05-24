@@ -1,6 +1,20 @@
+# Base
 pandas>=1.5
 tqdm>=4.64
-lightkurve>=2.0
 pyarrow>=12.0
 notebook>=6.5
 ipywidgets>=8.0
+
+# Ciencia de datos
+scikit-learn>=1.2
+matplotlib>=3.7
+numpy>=1.24
+
+# Deep Learning
+torch>=2.0
+torchvision>=0.15
+
+# Astronomía
+lightkurve>=2.0
+
+# AstroConformer (si usa algún requisito extra, puede añadirse aquí)

@@ -212,4 +212,4 @@ check_progress.ipynb
 # Archivos de salida de procesamiento
 backups/*
 outputs/*
-
+data/train/*

@@ -76,14 +76,19 @@ def evaluate(model, loader, criterion, device):
 def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=1e-5, freeze_encoder=True, patience=5, debug=False):
     with open("data/train/label_encoder.pkl", "rb") as f:
         label_encoder = pickle.load(f)
+
     args = argparse.Namespace(
-        input_dim=1, in_channels=1, encoder_dim=128, hidden_dim=128,
-        output_dim=num_classes, num_heads=8, num_layers=5,
-        dropout=0.3, dropout_p=0.3, stride=20, kernel_size=3,
+        input_dim=1, in_channels=1,
+        encoder_dim=192,          # ← antes 128
+        hidden_dim=256,           # ← antes 128
+        output_dim=num_classes,
+        num_heads=8, num_layers=6,  # ← antes 5
+        dropout=0.3, dropout_p=0.3,
+        stride=20, kernel_size=3,
         norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
         timeshift=False, device=device
     )
-
+    
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
 
     all_labels = [y.item() for _, y, _ in train_loader.dataset]
@@ -96,7 +101,7 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=1e-
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
-    for epoch in trange(1, epochs + 1 if not debug else 2, desc="Entrenamiento"):
+    for epoch in trange(1, epochs + 1 if not debug else 2, desc="Entrenamiento del modelo"):
         train_loss, train_acc = train(model, train_loader, optimizer, criterion, device)
         val_loss, val_acc, report = evaluate(model, val_loader, criterion, device)
 

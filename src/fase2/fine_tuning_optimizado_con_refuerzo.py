@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -57,22 +56,20 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
 
     args = argparse.Namespace(
         input_dim=1, in_channels=1,
-        encoder_dim=192,          # ← antes 128
-        hidden_dim=256,           # ← antes 128
+        encoder_dim=192,
+        hidden_dim=256,
         output_dim=num_classes,
-        num_heads=8, num_layers=6,  # ← antes 5
+        num_heads=8, num_layers=6,
         dropout=0.3, dropout_p=0.3,
         stride=20, kernel_size=3,
         norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
         timeshift=False, device=device
-    )    
+    )
 
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=False).to(device)
-    #model.load_state_dict(torch.load("outputs/mejor_modelo_optimizado.pt"))
     state_dict = torch.load("outputs/mejor_modelo_optimizado.pt", map_location="cpu")
     model.load_state_dict(state_dict)
     model.to(device)
-    
     print("✅ Modelo cargado desde outputs/mejor_modelo_optimizado.pt")
 
     optimizer = optim.AdamW([
@@ -86,7 +83,7 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
-    for epoch in trange(1, epochs + 1 if not debug else 2, desc="Fine-tuning"):
+    for epoch in trange(1, epochs + 1 if not debug else 2, desc="Fine-tuning con refuerzo"):
         model.train()
         total_loss, correct, total = 0, 0, 0
         for x, y, mask in train_loader:
@@ -153,7 +150,6 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     plt.savefig("outputs/matriz_confusion_finetuning_optimizado.png")
     plt.show()
 
-    # Guardar errores mal clasificados
     errores = []
     for idx, (pred, true) in enumerate(zip(val_preds, val_true)):
         if pred != true:
@@ -162,12 +158,11 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
                 "clase_real": class_names[true],
                 "clase_predicha": class_names[pred]
             })
-    
+
     df_errores = pd.DataFrame(errores)
     df_errores.to_csv("outputs/errores_mal_clasificados.csv", index=False)
     print("💾 Guardado CSV con errores: outputs/errores_mal_clasificados.csv")
 
-    
     if debug:
         print("🛑 Debug activo: fine-tuning detenido tras primera época.")
 

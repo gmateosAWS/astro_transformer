@@ -28,7 +28,7 @@ rows_written = 0
 
 print("🔄 Procesando Gaia y normalizando clases...")
 gaia_dataset = ds.dataset(str(FILE_GAIA), format="parquet")
-scanner = gaia_dataset.scanner(batch_size=500)
+scanner = gaia_dataset.scanner(batch_size=2000)
 
 for i, batch in enumerate(tqdm(scanner.to_batches(), desc="Procesando Gaia", unit="batch")):
     df = pa.Table.from_batches([batch]).to_pandas()

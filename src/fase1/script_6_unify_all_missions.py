@@ -1,4 +1,4 @@
-# script_6_unify_all_missions.py (conversión preventiva a float64 en pandas)
+# script_6_unify_all_missions.py (actualizado con normalización centralizada)
 
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import gc
 from collections import defaultdict
+from src.utils.normalization_dict import normalize_label
 
 INPUT_DIR = Path("data/processed")
 OUTPUT_FILE = INPUT_DIR / "all_missions_labeled.parquet"
@@ -17,28 +18,9 @@ FILES = [
     "dataset_eb_kepler_labeled_fixed.parquet",
     "dataset_eb_tess_labeled_fixed.parquet",
     "dataset_k2varcat_labeled_fixed.parquet",
-    "dataset_vsx_tess_labeled_fixed.parquet",
-    "dataset_gaia_dr3_vsx_tic_labeled.parquet"
+    "dataset_vsx_tess_labeled_fixed.parquet"
+    #"dataset_gaia_dr3_vsx_tic_labeled.parquet"
 ]
-
-NORMALIZATION_DICT = {
-    "EB": "Eclipsing Binary", "EA": "Eclipsing Binary", "EW": "Eclipsing Binary",
-    "EA/RS": "Eclipsing Binary", "EA|EB": "Eclipsing Binary", "EA:": "Eclipsing Binary",
-    "ELL/RS": "Eclipsing Binary", "ELL/DW:": "Eclipsing Binary", "EB,": "Eclipsing Binary",
-    "RRAB": "RR Lyrae", "RRC": "RR Lyrae", "RRAB/BL": "RR Lyrae", "RRAB:": "RR Lyrae",
-    "RR": "RR Lyrae", "RRD": "RR Lyrae", "RRC|EC": "RR Lyrae", "ACEP": "RR Lyrae",
-    "DSCT": "Delta Scuti", "DSCTC": "Delta Scuti", "DSCT|GDOR|SXPHE": "Delta Scuti",
-    "DSCT|EC|ESD": "Delta Scuti", "DSCT:": "Delta Scuti",
-    "ROT": "Rotational", "BY": "Rotational", "BY:": "Rotational", "ROT/WD": "Rotational",
-    "RS": "Rotational", "RS:": "Rotational", "RS_CVn": "Rotational",
-    "M": "Irregular", "L": "Irregular", "SR": "Irregular", "SR:": "Irregular",
-    "SRB": "Irregular", "SRB:": "Irregular", "SRA": "Irregular", "SRS": "Irregular",
-    "LPV": "Irregular", "LB": "Irregular", "SR|M": "Irregular", "LC": "Irregular",
-    "CV": "Cataclysmic", "CV:": "Cataclysmic", "NL:": "Cataclysmic",
-    "ZZA": "White Dwarf", "WD": "White Dwarf",
-    "YSO": "Young Stellar Object", "T Tauri": "Young Stellar Object",
-    "VAR": "Variable", "VAR:": "Variable", "UNKNOWN": "Unknown", "": "Unknown"
-}
 
 REQUIRED_COLS = ["id_objeto", "tiempo", "magnitud", "clase_variable"]
 WRITER = None
@@ -54,7 +36,7 @@ for fname in FILES:
     dataset = ds.dataset(str(path), format="parquet")
     for batch in dataset.to_batches():
         df_sample = pa.Table.from_batches([batch]).to_pandas()
-        df_sample["clase_variable_normalizada"] = df_sample["clase_variable"].map(NORMALIZATION_DICT).fillna("Other")
+        df_sample["clase_variable_normalizada"] = df_sample["clase_variable"].apply(normalize_label)
         df_sample["source_dataset"] = fname
         for col in df_sample.columns:
             column_types[col].add(str(df_sample[col].dropna().dtype))
@@ -104,7 +86,8 @@ for fname in FILES:
 
     for batch in dataset.to_batches():
         df_batch = pa.Table.from_batches([batch]).to_pandas()
-        df_batch["clase_variable_normalizada"] = df_batch["clase_variable"].map(NORMALIZATION_DICT).fillna("Other")
+        df_batch["clase_variable_normalizada"] = df_batch["clase_variable"].apply(normalize_label)
+        df_batch = df_batch[df_batch["clase_variable_normalizada"] != "Unknown"]
         df_batch["source_dataset"] = fname
         all_normalized_labels.extend(df_batch["clase_variable_normalizada"].tolist())
 

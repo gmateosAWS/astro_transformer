@@ -11,13 +11,12 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u
 import shutil
 import pyarrow.dataset as ds
+from src.utils.normalization_dict import normalize_label
 from src.utils.inspect_and_export_summary import inspect_and_export_summary
 
-from src.script_3a_clean_vsx_classes import normalizar_clase  # importa función del script anterior
-
-INPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled.parquet"
-OUTPUT_PARQUET = "data/processed/dataset_vsx_tess_labeled.parquet"
-TEMP_DIR = Path("data/processed/temp_vsx_tess")
+INPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled_south.parquet"
+OUTPUT_PARQUET = "data/processed/dataset_vsx_tess_labeled_south.parquet"
+TEMP_DIR = Path("data/processed/temp_vsx_tess_south")
 
 # --- Descarga y procesamiento de una curva ---
 def descargar_curva_tess(tic_id, ra, dec):
@@ -58,7 +57,7 @@ def procesar_lote(tic_id, clase, ra, dec):
     if curva is None or curva.empty:
         return None
     curva["clase_variable"] = clase
-    curva["clase_variable_normalizada"] = normalizar_clase(clase)
+    curva["clase_variable_normalizada"] = curva["clase_variable"].apply(normalize_label)
     curva["id_mision"] = f"TIC_{tic_id}"
     curva["mision"] = "TESS"
     curva["origen_etiqueta"] = "VSX"
@@ -106,7 +105,6 @@ def procesar_todos(df, num_workers=4):
 
     print("🧹 Eliminando temporales...")
     shutil.rmtree(TEMP_DIR, ignore_errors=True)
-
 
 # --- MAIN ---
 def main(limit=None, workers=4):

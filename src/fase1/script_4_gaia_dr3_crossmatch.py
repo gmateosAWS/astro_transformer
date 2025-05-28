@@ -14,6 +14,7 @@ import csv
 import json
 import shutil
 from multiprocessing import Pool
+from src.utils.inspect_and_export_summary import inspect_and_export_summary
 
 # --- Configuración ---
 DATA_DIR = Path("data/processed")
@@ -98,57 +99,6 @@ def procesar_objeto(obj):
         return df
     except Exception:
         return None
-
-# --- Función para inspección y resumen ---
-def inspect_and_export_summary(parquet_path, output_format="csv"):
-    print(f"\n📁 Inspeccionando: {parquet_path}")
-    dataset = ds.dataset(parquet_path, format="parquet")
-    schema = dataset.schema
-
-    summary = {
-        "file": str(parquet_path),
-        "columns": {field.name: str(field.type) for field in schema},
-        "class_distribution": {},
-        "total_rows": 0,
-        "total_objects": 0,
-        "timestamp": datetime.now().isoformat()
-    }
-
-    class_counter = Counter()
-    objetos = set()
-
-    for batch in tqdm(dataset.to_batches(columns=["clase_variable", "id_objeto"]), desc="🧮 Procesando por lotes"):
-        summary["total_rows"] += batch.num_rows
-        if "clase_variable" in batch.schema.names:
-            clases = batch.column("clase_variable").to_pylist()
-            class_counter.update(clases)
-        if "id_objeto" in batch.schema.names:
-            objetos.update(batch.column("id_objeto").to_pylist())
-
-    summary["class_distribution"] = dict(class_counter)
-    summary["total_objects"] = len(objetos)
-
-    SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
-    basename = Path(parquet_path).stem
-    output_path = SUMMARY_DIR / f"{basename}_summary.{output_format}"
-
-    if output_format == "json":
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-    elif output_format == "csv":
-        with open(output_path, "w", newline='', encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Clase", "Recuento"])
-            for clase, count in class_counter.items():
-                writer.writerow([clase, count])
-        with open(str(output_path).replace(".csv", "_info.txt"), "w", encoding="utf-8") as f:
-            f.write(f"Fichero: {summary['file']}\n")
-            f.write(f"Filas totales: {summary['total_rows']}\n")
-            f.write(f"Curvas únicas (id_objeto): {summary['total_objects']}\n")
-            f.write(f"Columnas: {list(summary['columns'].keys())}\n")
-            f.write(f"Fecha: {summary['timestamp']}\n")
-
-    print(f"✅ Resumen exportado a: {output_path}")
 
 # --- Proceso completo ---
 def procesar_cruce(df, workers=4):

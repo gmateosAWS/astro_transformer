@@ -21,11 +21,14 @@ from src.utils.inspect_and_export_summary import inspect_and_export_summary
 
 VSX_PATH = "catalogs/vsx_catalog.csv"
 TIC_DIR = Path("data/raw/tic_chunks")
-OUTPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled.parquet"
+#TIC_DIR = Path("F:/TFM/tic_chunks")
+OUTPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled_north.parquet"
 TEMP_DIR = Path("data/processed/temp_vsx_tic")
 
-DEC_MIN = -20
-DEC_MAX = +20
+# Zona del cielo a explorar 
+# +20 a +90 (norte)	Zona más poblada del cielo. Alta densidad de estrellas. Más candidatos esperables. 
+DEC_MIN = +20
+DEC_MAX = +90
 
 # === Generar nombre de bin DEC ===
 def dec_bin_from_value(dec):
@@ -158,7 +161,6 @@ def cruzar_vsx_con_tic(vsx_df, tic_path, radio_arcsec=2.0):
         print(f"❌ Error leyendo {tic_path.name}: {e}")
     return resultados
 
-
 # === MAIN ===
 def main(limit=None, radio_arcsec=2.0, limit_bins=None, max_download_workers=4):
     if not os.path.exists(VSX_PATH):
@@ -204,7 +206,7 @@ def main(limit=None, radio_arcsec=2.0, limit_bins=None, max_download_workers=4):
         p.unlink()
     
     shutil.rmtree(TEMP_DIR, ignore_errors=True)
-    print("🧹 Archivos temporales eliminados.")
+    print("🧹 Archivos temporales eliminados. Compruébalo.")
 
 if __name__ == "__main__":
     main(limit=5000, radio_arcsec=3.0, limit_bins=30, max_download_workers=4)

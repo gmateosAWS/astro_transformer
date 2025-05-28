@@ -15,7 +15,9 @@ sns.set(style="whitegrid")
 # Configuración
 DATASET_PATHS = [
     "data/processed/all_missions_labeled.parquet",
-    "data/processed/dataset_gaia_complemented_normalized.parquet"
+    "data/processed/dataset_gaia_complemented_normalized.parquet",
+    "data/processed/dataset_vsx_tess_labeled_south.parquet",
+    "data/processed/dataset_vsx_tess_labeled_north.parquet"    
 ]
 # Dataset streaming por lotes
 dataset = ds.dataset(DATASET_PATHS, format="parquet")

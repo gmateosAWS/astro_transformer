@@ -101,7 +101,9 @@ def main(seq_length=20000, batch_size=64, num_workers=4, limit_objects=None, dev
     print("\U0001F4C2 Cargando datos en lotes con PyArrow...", flush=True)
     DATASET_PATHS = [
         "data/processed/all_missions_labeled.parquet",
-        "data/processed/dataset_gaia_complemented_normalized.parquet"
+        "data/processed/dataset_gaia_complemented_normalized.parquet",
+        "data/processed/dataset_vsx_tess_labeled_south.parquet",
+        "data/processed/dataset_vsx_tess_labeled_north.parquet"
     ]
 
     grouped_data = load_and_group_batches(DATASET_PATHS, max_per_class)

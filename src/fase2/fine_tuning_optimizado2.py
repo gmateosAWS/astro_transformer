@@ -11,6 +11,7 @@ import numpy as np
 from tqdm.notebook import trange
 import pandas as pd
 from Astroconformer.Astroconformer.Model.models import Astroconformer as AstroConformer
+from src.utils.focal_loss import FocalLoss
 
 class AstroConformerClassifier(nn.Module):
     def __init__(self, args, num_classes, freeze_encoder=False):
@@ -49,7 +50,9 @@ def evaluate(model, loader, criterion, device):
         all_labels.extend(y.cpu().numpy())
     return total_loss / len(loader), all_preds, all_labels
 
-def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patience=4, debug=False):
+def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patience=4, debug=False,
+         freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0):
+
     with open("data/train/label_encoder.pkl", "rb") as f:
         label_encoder = pickle.load(f)
     class_names = list(label_encoder.keys())
@@ -65,18 +68,17 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
         timeshift=False, device=device
     )
 
-    model = AstroConformerClassifier(args, num_classes, freeze_encoder=False).to(device)
+    model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
     state_dict = torch.load("outputs/mejor_modelo_optimizado.pt", map_location=device)
     model.load_state_dict(state_dict)
-
     print("✅ Modelo cargado desde outputs/mejor_modelo_optimizado.pt")
 
     optimizer = optim.AdamW([
-        {"params": model.encoder.parameters(), "lr": 2e-6},
-        {"params": model.classifier.parameters(), "lr": 1e-5}
+        {"params": model.encoder.parameters(), "lr": encoder_lr},
+        {"params": model.classifier.parameters(), "lr": head_lr}
     ], weight_decay=1e-4)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion = FocalLoss(gamma=gamma, reduction="mean", label_smoothing=0.1)
 
     train_losses, val_losses, train_accs, val_accs = [], [], [], []
     best_val_loss = float("inf")
@@ -85,6 +87,12 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     for epoch in trange(1, epochs + 1 if not debug else 2, desc="Fine-tuning"):
         model.train()
         total_loss, correct, total = 0, 0, 0
+
+        if freeze_encoder and epoch == freeze_epochs:
+            for param in model.encoder.parameters():
+                param.requires_grad = True
+            print(f"🔓 Encoder descongelado en epoch {epoch}")
+
         for x, y, mask in train_loader:
             x, y, mask = x.to(device), y.to(device), mask.to(device)
             optimizer.zero_grad()

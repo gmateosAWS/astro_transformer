@@ -97,16 +97,59 @@ def load_and_group_batches(DATASET_PATHS, max_per_class):
 
     return grouped_data
 
-def main(seq_length=20000, batch_size=64, num_workers=4, limit_objects=None, device="cpu", max_per_class=100000):
+def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None):
+    dataset = ds.dataset(DATASET_PATHS, format="parquet")
+    scanner = dataset.scanner(columns=["id_objeto", "magnitud", "clase_variable_normalizada"], batch_size=256)
+
+    grouped_data = {}
+    class_counts = defaultdict(int)
+
+    for batch in tqdm(scanner.to_batches(), desc="Agrupando curvas por objeto", unit="batch"):
+        df = batch.to_pandas()
+        df["id_objeto"] = df["id_objeto"].astype(str)
+        for id_obj, group in df.groupby("id_objeto"):
+            clase = group["clase_variable_normalizada"].iloc[0]
+            if not isinstance(clase, str) or clase.strip() == "":
+                continue
+            max_limit = max_per_class_override.get(clase, max_per_class_global)
+            if max_limit is not None and class_counts[clase] >= max_limit:
+                continue
+            if id_obj not in grouped_data:
+                grouped_data[id_obj] = group
+                class_counts[clase] += 1
+
+    return grouped_data
+
+
+def main(
+    seq_length=20000,
+    batch_size=64,
+    num_workers=4,
+    limit_objects=None,
+    device="cpu",
+    max_per_class=None,
+    max_per_class_override=None
+):
     print("\U0001F4C2 Cargando datos en lotes con PyArrow...", flush=True)
+
     DATASET_PATHS = [
         "data/processed/all_missions_labeled.parquet",
         "data/processed/dataset_gaia_complemented_normalized.parquet",
         "data/processed/dataset_vsx_tess_labeled_south.parquet",
-        "data/processed/dataset_vsx_tess_labeled_north.parquet"
+        "data/processed/dataset_vsx_tess_labeled_north.parquet",
+        "data/processed/dataset_vsx_tess_labeled_ampliado.parquet"
     ]
 
-    grouped_data = load_and_group_batches(DATASET_PATHS, max_per_class)
+    # Si no se pasa override explícito, usar uno vacío
+    if max_per_class_override is None:
+        max_per_class_override = {}
+
+    grouped_data = load_and_group_batches(
+        DATASET_PATHS,
+        max_per_class_global=max_per_class,
+        max_per_class_override=max_per_class_override
+    )
+
     grouped_list = list(grouped_data.items())
     random.shuffle(grouped_list)
 

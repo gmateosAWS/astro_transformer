@@ -1,4 +1,4 @@
-# script_3b_download_tess_curves_from_vsx_north.py
+# script_3b_download_tess_curves_from_vsx_ampliado.py
 
 import os
 import pandas as pd
@@ -19,14 +19,13 @@ from collections import Counter
 from src.utils.normalization_dict import normalize_label
 from src.utils.inspect_and_export_summary import inspect_and_export_summary
 
-# Para la siguiente busqueda, solo estas: "Cataclysmic", "RR Lyrae", "White Dwarf", "Young Stellar Object"
+# Para la siguiente busqueda, solo estas clases minoritarias: "Cataclysmic", "RR Lyrae", "White Dwarf", "Young Stellar Object"
 CLASES_OBJETIVO = [
-    "Cataclysmic", "White Dwarf", "RR Lyrae",
-    "Young Stellar Object", "Irregular", "Variable", "Delta Scuti"
+    "Cataclysmic", "RR Lyrae", "White Dwarf", "Young Stellar Object"
 ]
 
-INPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled_north.parquet"
-OUTPUT_PARQUET = "data/processed/dataset_vsx_tess_labeled_north.parquet"
+INPUT_PARQUET = "data/processed/dataset_vsx_tic_labeled_ampliado.parquet"
+OUTPUT_PARQUET = "data/processed/dataset_vsx_tess_labeled_ampliado.parquet"
 TEMP_DIR = Path("data/processed/temp_vsx_tess_north")
 
 # --- Descarga y procesamiento de una curva ---

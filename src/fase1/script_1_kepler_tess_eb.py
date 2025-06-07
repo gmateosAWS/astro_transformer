@@ -173,39 +173,12 @@ def main(mission="ALL", only_pending=True, max_workers=8, use_sample=False):
     print("[⭢] Leyendo y fusionando curvas descargadas...", flush=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     if mission.upper() == "KEPLER":
-        #df_curvas = read_and_merge_curves(RAW_DIR / "kepler", batch_size=500)
         read_and_merge_curves(RAW_DIR / "kepler", output_path=PROCESSED_DIR / "dataset_eb_kepler.parquet", df_catalog=df_kepler)
-        #df_ids = df_kepler.copy()
-        #output_file = "dataset_eb_kepler.parquet"
     elif mission.upper() == "TESS":
-        #df_curvas = read_and_merge_curves(RAW_DIR / "tess", batch_size=500)
         read_and_merge_curves(RAW_DIR / "tess", output_path=PROCESSED_DIR / "dataset_eb_tess.parquet", df_catalog=df_tess)
-        #df_ids = df_tess.copy()
-        #output_file = "dataset_eb_tess.parquet"
     else:
-        #df_curvas_k = read_and_merge_curves(RAW_DIR / "kepler", batch_size=500)
-        #df_curvas_t = read_and_merge_curves(RAW_DIR / "tess", batch_size=500)
         read_and_merge_curves(RAW_DIR / "kepler", output_path=PROCESSED_DIR / "dataset_eb_kepler.parquet", df_catalog=df_kepler)
         read_and_merge_curves(RAW_DIR / "tess", output_path=PROCESSED_DIR / "dataset_eb_tess.parquet", df_catalog=df_tess)
-        #df_curvas = pd.concat([df_curvas_k, df_curvas_t], ignore_index=True)
-        #df_ids = pd.concat([df_kepler, df_tess], ignore_index=True)
-        #output_file = "dataset_eb.parquet"
-
-    # Paso 5: merge de metadatos (etiquetas)
-    #print("[⭢] Fusionando metadatos (etiquetas)...", flush=True)    
-    #df_ids["id"] = df_ids["id"].astype(str)
-    #df_curvas["id_objeto"] = df_curvas["id_objeto"].astype(str)
-    #df_merged = df_curvas.merge(df_ids, left_on=["id_objeto", "mision"], right_on=["id", "mission"], how="left")
-    #df_merged["origen_etiqueta"] = "EB-catalog"
-    #df_merged["clase_variable"] = df_merged["clase_variable"].fillna("Unknown")
-    
-    #print(f"[✓] Curvas unificadas: {df_merged['id_objeto'].nunique()} estrellas", flush=True)
-    #print(f"[✓] Total de filas: {len(df_merged):,}", flush=True)
-
-    # Paso 6: guardar dataset final
-    #builder = DatasetBuilder(base_dir=PROCESSED_DIR)
-    #builder.add_source("EB", df_merged, "clase_variable", "EB-catalog")
-    #builder.save(df_merged, output_file, format="parquet")
 
     print(f"[⏱] Tiempo total: {time.perf_counter() - t0:.2f} segundos", flush=True)
 

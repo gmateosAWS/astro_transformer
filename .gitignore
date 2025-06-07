@@ -196,6 +196,7 @@ cython_debug/
 # Archivos derivados de descargas y procesamiento
 data/raw/
 data/processed/
+data/temp 
 
 # Listas de trabajo generadas automáticamente
 data/lists/

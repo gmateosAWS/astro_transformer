@@ -127,6 +127,37 @@ def download_from_csv_parallel2(csv_path, base_output_dir="data", max_workers=8)
 
     print(f"[✔] Descarga finalizada: {len(results)} objetos procesados.", flush=True)
 
+def download_from_csv_parallel_simple(df, base_output_dir="data", max_workers=4):
+    """
+    Descarga curvas de luz en paralelo (por hilos) desde un DataFrame
+    con columnas 'id' y 'mission'. No usa multiprocessing.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+
+    total = len(df)
+    print(f"[⬇] Descargando {total} curvas con {max_workers} hilos...", flush=True)
+
+    def process_row(row):
+        star_id = str(row["id"]).strip()
+        mission = row["mission"].strip()
+        out_dir = os.path.join(base_output_dir, mission.lower())
+        download_curve(star_id, mission, out_dir)
+        return star_id, "OK"
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_row, row) for _, row in df.iterrows()]
+        for future in tqdm(as_completed(futures), total=total, desc="🚀 Descargando curvas"):
+            try:
+                result = future.result(timeout=300)
+                results.append(result)
+            except Exception as e:
+                print(f"❌ Error en una tarea: {e}", flush=True)
+                results.append(("unknown", f"Error: {e}"))
+
+    print(f"[✓] Descarga finalizada: {len(results)} objetos procesados.")
+
 
 def download_from_csv_parallel(csv_path, base_output_dir="data", max_workers=8):
     """

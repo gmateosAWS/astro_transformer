@@ -11,6 +11,13 @@ import pickle
 from sklearn.model_selection import train_test_split
 from collections import defaultdict, Counter
 import random
+import gc
+import time  # <-- Añadido para medir tiempos
+
+# Importar función de normalización de clases
+from src.utils.normalization_dict import normalize_label
+from src.utils.column_mapping import COLUMN_MAPPING, map_column_name, find_column
+from src.utils.dataset_paths import DATASET_PATHS
 
 discard_reasons = {
     "all_nan": 0,
@@ -38,9 +45,63 @@ class LightCurveDataset(Dataset):
             torch.tensor(self.masks[idx], dtype=torch.float32),
         )
 
+def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128):
+    print(f"\U000023F3 [INFO] Iniciando agrupación de curvas por objeto...", flush=True)
+    start_time = time.time()
+    dataset = ds.dataset(DATASET_PATHS, format="parquet")
+    # Determinar nombres físicos de columnas
+    schema = dataset.schema
+    id_col = find_column(schema.names, "id")
+    mag_col = find_column(schema.names, "magnitud")
+    clase_col = find_column(schema.names, "clase_variable_normalizada")
+    cols = [id_col, mag_col, clase_col]
+    cols = [c for c in cols if c is not None]
+
+    scanner = dataset.scanner(columns=cols, batch_size=batch_size)
+    grouped_data = {}
+    class_counts = defaultdict(int)
+
+    total_batches = scanner.count_rows() // batch_size + 1
+    processed_batches = 0
+
+    for batch in tqdm(scanner.to_batches(), desc="Agrupando curvas por objeto", unit="batch"):
+        processed_batches += 1
+        if processed_batches % 10 == 0:
+            elapsed = time.time() - start_time
+            #print(f"\U000023F3 [INFO] Procesados {processed_batches} batches, tiempo transcurrido: {elapsed:.1f}s", flush=True)
+        df = batch.to_pandas()
+        # Usar los nombres físicos detectados
+        df_id = find_column(df.columns, "id")
+        df_mag = find_column(df.columns, "magnitud")
+        df_clase = find_column(df.columns, "clase_variable_normalizada")
+        df["id"] = df[df_id].astype(str)
+        for id_obj, group in df.groupby("id"):
+            clase = group[df_clase].iloc[0]
+            if not isinstance(clase, str) or clase.strip() == "":
+                continue
+            max_limit = max_per_class_override.get(clase, max_per_class_global)
+            if max_limit is not None and class_counts[clase] >= max_limit:
+                continue
+            if id_obj not in grouped_data:
+                grouped_data[id_obj] = group
+                class_counts[clase] += 1
+        del df, batch
+        gc.collect()
+
+    elapsed = time.time() - start_time
+    # Mostrar el tiempo en minutos y segundos
+    elapsed_minutes = elapsed // 60
+    elapsed_seconds = elapsed % 60
+    print(f"\U000023F3 [INFO] Agrupación finalizada en {elapsed_minutes:.0f} minutos y {elapsed_seconds:.1f} segundos", flush=True)
+    print(f"\U0001F4C8 [INFO] Total de objetos agrupados: {len(grouped_data)}", flush=True)
+    return grouped_data
+
 def process_single_curve(group, seq_length, device):
     id_objeto, df = group
-    magnitudes = df["magnitud"].to_numpy()
+    # Usar mapeo robusto de columnas
+    mag_col = find_column(df.columns, "magnitud")
+    clase_col = find_column(df.columns, "clase_variable_normalizada")
+    magnitudes = df[mag_col].to_numpy()
 
     if np.all(np.isnan(magnitudes)):
         discard_reasons["all_nan"] += 1
@@ -71,55 +132,10 @@ def process_single_curve(group, seq_length, device):
     padded_curve[:effective_length] = magnitudes_norm[:effective_length]
     attention_mask[:effective_length] = 1
 
-    clase = df["clase_variable_normalizada"].iloc[0]
+    # Normalizar la clase usando el diccionario común
+    clase = normalize_label(df[clase_col].iloc[0])
     discard_reasons["ok"] += 1
     return padded_curve, clase, attention_mask
-
-def load_and_group_batches(DATASET_PATHS, max_per_class):
-    dataset = ds.dataset(DATASET_PATHS, format="parquet")
-    scanner = dataset.scanner(columns=["id_objeto", "magnitud", "clase_variable_normalizada"], batch_size=256)
-
-    grouped_data = {}
-    class_counts = defaultdict(int)
-
-    for batch in tqdm(scanner.to_batches(), desc="Agrupando curvas por objeto", unit="batch"):
-        df = batch.to_pandas()
-        df["id_objeto"] = df["id_objeto"].astype(str)
-        for id_obj, group in df.groupby("id_objeto"):
-            clase = group["clase_variable_normalizada"].iloc[0]
-            if not isinstance(clase, str) or clase.strip() == "":
-                continue
-            if max_per_class is not None and class_counts[clase] >= max_per_class:
-                continue
-            if id_obj not in grouped_data:
-                grouped_data[id_obj] = group
-                class_counts[clase] += 1
-
-    return grouped_data
-
-def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None):
-    dataset = ds.dataset(DATASET_PATHS, format="parquet")
-    scanner = dataset.scanner(columns=["id_objeto", "magnitud", "clase_variable_normalizada"], batch_size=256)
-
-    grouped_data = {}
-    class_counts = defaultdict(int)
-
-    for batch in tqdm(scanner.to_batches(), desc="Agrupando curvas por objeto", unit="batch"):
-        df = batch.to_pandas()
-        df["id_objeto"] = df["id_objeto"].astype(str)
-        for id_obj, group in df.groupby("id_objeto"):
-            clase = group["clase_variable_normalizada"].iloc[0]
-            if not isinstance(clase, str) or clase.strip() == "":
-                continue
-            max_limit = max_per_class_override.get(clase, max_per_class_global)
-            if max_limit is not None and class_counts[clase] >= max_limit:
-                continue
-            if id_obj not in grouped_data:
-                grouped_data[id_obj] = group
-                class_counts[clase] += 1
-
-    return grouped_data
-
 
 def main(
     seq_length=20000,
@@ -128,37 +144,38 @@ def main(
     limit_objects=None,
     device="cpu",
     max_per_class=None,
-    max_per_class_override=None
+    max_per_class_override=None,
+    parquet_dir="data/processed"
 ):
     print("\U0001F4C2 Cargando datos en lotes con PyArrow...", flush=True)
+    global_start = time.time()
 
-    DATASET_PATHS = [
-        "data/processed/all_missions_labeled.parquet",
-        "data/processed/dataset_gaia_complemented_normalized.parquet",
-        "data/processed/dataset_vsx_tess_labeled_south.parquet",
-        "data/processed/dataset_vsx_tess_labeled_north.parquet",
-        "data/processed/dataset_vsx_tess_labeled_ampliado.parquet"
-    ]
-
-    # Si no se pasa override explícito, usar uno vacío
     if max_per_class_override is None:
         max_per_class_override = {}
 
+    # --- Agrupación de datos ---
+    t0 = time.time()
     grouped_data = load_and_group_batches(
         DATASET_PATHS,
         max_per_class_global=max_per_class,
-        max_per_class_override=max_per_class_override
+        max_per_class_override=max_per_class_override,
+        batch_size=128  # Reduce si hay problemas de memoria
     )
+    t1 = time.time()
+    print(f"\U000023F3 [INFO] Tiempo en agrupación de datos: {t1-t0:.1f} segundos", flush=True)
 
     grouped_list = list(grouped_data.items())
     random.shuffle(grouped_list)
 
     print(f"\U0001F680 Procesando {len(grouped_list)} curvas en paralelo usando {num_workers} CPUs...", flush=True)
+    t2 = time.time()
     with Pool(num_workers) as pool:
         results = pool.starmap(
             process_single_curve,
             [(group, seq_length, device) for group in grouped_list]
         )
+    t3 = time.time()
+    print(f"\U000023F3 [INFO] Tiempo en procesamiento paralelo: {t3-t2:.1f} segundos", flush=True)
 
     results = [r for r in results if r is not None]
     filtered = [r for r in results if not (
@@ -166,12 +183,15 @@ def main(
         np.isnan(r[2]).any() or np.isinf(r[2]).any()
     )]
 
+    print(f"\U0001F50B [INFO] Curvas válidas tras filtrado: {len(filtered)}", flush=True)
+
     sequences, labels, masks = zip(*filtered)
     unique_labels = sorted(set(labels))
     label_encoder = {label: idx for idx, label in enumerate(unique_labels)}
     encoded_labels = [label_encoder[label] for label in labels]
 
     os.makedirs("data/train", exist_ok=True)
+    print(f"\U0001F4BE [INFO] Guardando label_encoder.pkl...", flush=True)
     with open("data/train/label_encoder.pkl", "wb") as f:
         pickle.dump(label_encoder, f)
 
@@ -182,7 +202,7 @@ def main(
         print(f"{label:>2} ({name}): {count}")
 
     df_debug = pd.DataFrame({
-        "id_objeto": list(grouped_data.keys())[:len(labels)],
+        "id": list(grouped_data.keys())[:len(labels)],
         "clase_variable": labels,
         "clase_codificada": encoded_labels
     })
@@ -192,6 +212,7 @@ def main(
     encoded_labels = np.array(encoded_labels)
     masks = np.array(masks)
 
+    print(f"\U0001F4DD [INFO] Realizando split train/val...", flush=True)
     train_idx, val_idx = train_test_split(
         np.arange(len(encoded_labels)),
         test_size=0.2,
@@ -205,10 +226,17 @@ def main(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
+    # Guardar datasets serializados para no perderlos al reiniciar el kernel y poder subirlos a SageMaker
+    print(f"\U0001F4BE [INFO] Guardando datasets serializados...", flush=True)
+    torch.save(train_loader.dataset, "data/train/train_dataset.pt")
+    torch.save(val_loader.dataset, "data/train/val_dataset.pt")
+
     print("\n\U0001F4C9 Resumen de curvas descartadas:")
     for reason, count in discard_reasons.items():
         print(f"\U0001F538 {reason.replace('_', ' ').capitalize():30}: {count}")
 
     pd.DataFrame(discard_reasons.items(), columns=["motivo", "cantidad"]).to_csv("data/train/debug_descartes.csv", index=False)
-    print("\U00002705 Datos preparados como secuencias normalizadas y máscaras.")
+    total_time = time.time() - global_start
+    print(f"\U00002705 Datos preparados como secuencias normalizadas y máscaras.")
+    print(f"\U000023F3 [INFO] Tiempo total de ejecución: {total_time/60:.2f} minutos ({total_time:.1f} segundos)", flush=True)
     return train_loader, val_loader

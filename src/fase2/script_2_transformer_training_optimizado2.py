@@ -90,6 +90,21 @@ def evaluate(model, loader, criterion, device):
     report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
     return total_loss / len(loader), correct / total, report
 
+def export_model_to_onnx(model, output_path, input_size, device="cuda"):
+    model.eval()
+    dummy_input = torch.randn(*input_size).to(device)  # Define a test input
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        export_params=True,
+        opset_version=12,
+        do_constant_folding=True,
+        input_names=["input"],
+        output_names=["output"]
+    )
+    print(f"Modelo exportado a ONNX en: {output_path}")
+
 def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=3e-5, freeze_encoder=False, patience=6, debug=False):
     with open("data/train/label_encoder.pkl", "rb") as f:
         label_encoder = pickle.load(f)
@@ -161,4 +176,35 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=3e-
     plt.tight_layout()
     plt.savefig("outputs/curvas_entrenamiento_optimizado2.png")
     plt.show()
+
+    # Export the model to ONNX format
+    input_size = (1, args.input_dim, args.stride)  # Adjust according to your model
+    onnx_path = "outputs/modelo_optimizado.onnx"
+    export_model_to_onnx(model, onnx_path, input_size, device)
+
     return model
+
+if __name__ == "__main__":
+    # Define los argumentos del modelo
+    args = argparse.Namespace(
+        input_dim=1, in_channels=1,
+        encoder_dim=192,
+        hidden_dim=256,
+        output_dim=10,  # Numero de clases
+        num_heads=8, num_layers=6,
+        dropout=0.3, dropout_p=0.3,
+        stride=20, kernel_size=3,
+        norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
+        timeshift=False, device="cuda"
+    )
+
+    # Instancia el modelo
+    model = AstroConformerClassifier(args, num_classes=10).to("cuda")
+
+    # Carga los pesos del modelo entrenado
+    model.load_state_dict(torch.load("outputs/mejor_modelo_optimizado.pt"))
+
+    # Exporta el modelo a ONNX
+    input_size = (1, args.input_dim, args.stride)  # Ajustar segun modelo  
+    onnx_path = "outputs/modelo_optimizado.onnx"
+    export_model_to_onnx(model, onnx_path, input_size, device="cuda")

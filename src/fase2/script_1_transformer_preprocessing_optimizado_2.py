@@ -14,10 +14,28 @@ import random
 import gc
 import time
 import sys
+import time
+import sys
 
 # Importar función de normalización de clases
 from src.utils.normalization_dict import normalize_label
 from src.utils.column_mapping import COLUMN_MAPPING, map_column_name, find_column
+
+# Selección automática de paths según entorno
+def detect_aws_env():
+    # Detecta SageMaker/Jupyter en AWS por variables de entorno y paths típicos
+    if "SM_HOSTS" in os.environ or "SAGEMAKER_JOB_NAME" in os.environ:
+        return True
+    if "HOME" in os.environ and "SageMaker" in os.environ["HOME"]:
+        return True
+    if "JPY_PARENT_PID" in os.environ and "SageMaker" in os.getcwd():
+        return True
+    return False
+
+if detect_aws_env() or os.environ.get("RUN_ENV", "").lower() == "aws":
+    from src.utils.dataset_paths import DATASET_PATHS_AWS as DATASET_PATHS
+else:
+    from src.utils.dataset_paths import DATASET_PATHS
 
 # Selección automática de paths según entorno
 def detect_aws_env():
@@ -41,6 +59,7 @@ discard_reasons = {
     "short_curve": 0,
     "nan_or_inf_after_norm": 0,
     "unknown_class": 0,
+    "unknown_class": 0,
     "ok": 0
 }
 MIN_POINTS = 30
@@ -61,6 +80,15 @@ class LightCurveDataset(Dataset):
             torch.tensor(self.labels[idx], dtype=torch.long),
             torch.tensor(self.masks[idx], dtype=torch.float32),
         )
+
+def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path="data/train/grouped_data.pkl"):
+    # Si existe el cache, cargarlo y devolverlo
+    if os.path.exists(cache_path):
+        print(f"\U0001F4BE [INFO] Cargando agrupación de curvas desde cache: {cache_path}", flush=True)
+        with open(cache_path, "rb") as f:
+            grouped_data = pickle.load(f)
+        print(f"\U00002705 [INFO] Agrupación cargada desde cache. Total objetos: {len(grouped_data)}", flush=True)
+        return grouped_data
 
 def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path="data/train/grouped_data.pkl"):
     # Si existe el cache, cargarlo y devolverlo
@@ -103,18 +131,28 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
         if df_mag is not None:
             df[df_mag] = df[df_mag].astype(str).str.replace('>', '', regex=False).str.strip()
             df[df_mag] = pd.to_numeric(df[df_mag], errors='coerce')
+        # Limpiar valores tipo '>23.629' en la columna de magnitud
+        if df_mag is not None:
+            df[df_mag] = df[df_mag].astype(str).str.replace('>', '', regex=False).str.strip()
+            df[df_mag] = pd.to_numeric(df[df_mag], errors='coerce')
         df["id"] = df[df_id].astype(str)
         for id_obj, group in df.groupby("id"):
             clase = group[df_clase].iloc[0]
             clase_norm = normalize_label(clase)
             if not isinstance(clase, str) or clase.strip() == "" or clase_norm.lower() == "unknown":
                 discard_reasons["unknown_class"] += 1
+            clase_norm = normalize_label(clase)
+            if not isinstance(clase, str) or clase.strip() == "" or clase_norm.lower() == "unknown":
+                discard_reasons["unknown_class"] += 1
                 continue
+            max_limit = max_per_class_override.get(clase_norm, max_per_class_global)
+            if max_limit is not None and class_counts[clase_norm] >= max_limit:
             max_limit = max_per_class_override.get(clase_norm, max_per_class_global)
             if max_limit is not None and class_counts[clase_norm] >= max_limit:
                 continue
             if id_obj not in grouped_data:
                 grouped_data[id_obj] = group
+                class_counts[clase_norm] += 1
                 class_counts[clase_norm] += 1
         del df, batch
         gc.collect()
@@ -130,13 +168,28 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
     with open(cache_path, "wb") as f:
         pickle.dump(grouped_data, f)
     print(f"\U0001F4BE [INFO] Agrupación guardada en cache: {cache_path}", flush=True)
+    # Guardar agrupación en cache
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    with open(cache_path, "wb") as f:
+        pickle.dump(grouped_data, f)
+    print(f"\U0001F4BE [INFO] Agrupación guardada en cache: {cache_path}", flush=True)
     return grouped_data
+  
   
 def process_single_curve(group, seq_length, device):
     id_objeto, df = group
     # Usar mapeo robusto de columnas
     mag_col = find_column(df.columns, "magnitud")
     clase_col = find_column(df.columns, "clase_variable_normalizada")
+    # Limpiar valores tipo '>23.629' en la columna de magnitud
+    magnitudes_str = df[mag_col].astype(str).str.replace('>', '', regex=False).str.strip()
+    magnitudes = pd.to_numeric(magnitudes_str, errors='coerce').to_numpy()
+
+    clase = normalize_label(df[clase_col].iloc[0])
+    if clase.lower() == "unknown":
+        discard_reasons["unknown_class"] += 1
+        return None
+    
     # Limpiar valores tipo '>23.629' en la columna de magnitud
     magnitudes_str = df[mag_col].astype(str).str.replace('>', '', regex=False).str.strip()
     magnitudes = pd.to_numeric(magnitudes_str, errors='coerce').to_numpy()
@@ -184,6 +237,8 @@ def main(
     seq_length=20000,
     parquet_batch_size=64,
     dataloader_batch_size=128,
+    parquet_batch_size=64,
+    dataloader_batch_size=128,
     num_workers=4,
     limit_objects=None,
     device="cpu",
@@ -203,6 +258,8 @@ def main(
         DATASET_PATHS,
         max_per_class_global=max_per_class,
         max_per_class_override=max_per_class_override,
+        batch_size=parquet_batch_size,
+        cache_path="data/train/grouped_data.pkl"
         batch_size=parquet_batch_size,
         cache_path="data/train/grouped_data.pkl"
     )
@@ -231,7 +288,14 @@ def main(
     print(f"\U0001F50B [INFO] Curvas válidas tras filtrado: {len(filtered)}", flush=True)
 
     # Excluir unknown del label_encoder y de las etiquetas
+    # Excluir unknown del label_encoder y de las etiquetas
     sequences, labels, masks = zip(*filtered)
+    filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
+    sequences = [sequences[i] for i in filtered_indices]
+    labels = [labels[i] for i in filtered_indices]
+    masks = [masks[i] for i in filtered_indices]
+
+    # Crear label_encoder antes de codificar
     filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
     sequences = [sequences[i] for i in filtered_indices]
     labels = [labels[i] for i in filtered_indices]
@@ -240,6 +304,15 @@ def main(
     # Crear label_encoder antes de codificar
     unique_labels = sorted(set(labels))
     label_encoder = {label: idx for idx, label in enumerate(unique_labels)}
+    encoded_labels = np.array([label_encoder[label] for label in labels], dtype=np.int32)
+
+    # Convertir a float16 para ahorrar memoria
+    sequences = np.array(sequences, dtype=np.float16)
+    masks = np.array(masks, dtype=np.float16)
+
+    print(f"[INFO] Uso de memoria de sequences: {sequences.nbytes/1024/1024:.2f} MB")
+    print(f"[INFO] Uso de memoria de masks: {masks.nbytes/1024/1024:.2f} MB")
+    print(f"[INFO] Uso de memoria de labels: {encoded_labels.nbytes/1024/1024:.2f} MB")
     encoded_labels = np.array([label_encoder[label] for label in labels], dtype=np.int32)
 
     # Convertir a float16 para ahorrar memoria
@@ -267,6 +340,14 @@ def main(
         "clase_codificada": encoded_labels
     })
     df_debug.to_csv("data/train/debug_clases_codificadas.csv", index=False)
+
+    # ADVERTENCIA: El uso de memoria será muy alto con 85k curvas x 25k puntos, incluso en float16 (~40GB solo para sequences)
+    # Si tienes problemas de memoria, considera guardar los arrays en disco y usar un Dataset que lea bajo demanda.
+    # Aquí solo se muestra el cálculo de memoria y una advertencia.
+    print(f"[INFO] N curvas: {len(sequences)}, seq_length: {sequences[0].shape[0] if len(sequences) > 0 else 0}")
+    print(f"[INFO] Estimación memoria sequences (float16): {len(sequences)*seq_length*2/1024/1024/1024:.2f} GB")
+    print(f"[INFO] Estimación memoria sequences (float32): {len(sequences)*seq_length*4/1024/1024/1024:.2f} GB")
+    print(f"[INFO] Si tienes problemas de memoria, considera usar almacenamiento en disco y Dataset bajo demanda.")
 
     # ADVERTENCIA: El uso de memoria será muy alto con 85k curvas x 25k puntos, incluso en float16 (~40GB solo para sequences)
     # Si tienes problemas de memoria, considera guardar los arrays en disco y usar un Dataset que lea bajo demanda.

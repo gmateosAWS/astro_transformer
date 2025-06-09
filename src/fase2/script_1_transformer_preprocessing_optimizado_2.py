@@ -147,8 +147,6 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
                 continue
             max_limit = max_per_class_override.get(clase_norm, max_per_class_global)
             if max_limit is not None and class_counts[clase_norm] >= max_limit:
-            max_limit = max_per_class_override.get(clase_norm, max_per_class_global)
-            if max_limit is not None and class_counts[clase_norm] >= max_limit:
                 continue
             if id_obj not in grouped_data:
                 grouped_data[id_obj] = group
@@ -237,8 +235,6 @@ def main(
     seq_length=20000,
     parquet_batch_size=64,
     dataloader_batch_size=128,
-    parquet_batch_size=64,
-    dataloader_batch_size=128,
     num_workers=4,
     limit_objects=None,
     device="cpu",
@@ -258,8 +254,6 @@ def main(
         DATASET_PATHS,
         max_per_class_global=max_per_class,
         max_per_class_override=max_per_class_override,
-        batch_size=parquet_batch_size,
-        cache_path="data/train/grouped_data.pkl"
         batch_size=parquet_batch_size,
         cache_path="data/train/grouped_data.pkl"
     )

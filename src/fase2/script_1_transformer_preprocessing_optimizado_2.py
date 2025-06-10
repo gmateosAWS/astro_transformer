@@ -90,15 +90,6 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
         print(f"\U00002705 [INFO] Agrupación cargada desde cache. Total objetos: {len(grouped_data)}", flush=True)
         return grouped_data
 
-def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path="data/train/grouped_data.pkl"):
-    # Si existe el cache, cargarlo y devolverlo
-    if os.path.exists(cache_path):
-        print(f"\U0001F4BE [INFO] Cargando agrupación de curvas desde cache: {cache_path}", flush=True)
-        with open(cache_path, "rb") as f:
-            grouped_data = pickle.load(f)
-        print(f"\U00002705 [INFO] Agrupación cargada desde cache. Total objetos: {len(grouped_data)}", flush=True)
-        return grouped_data
-
     print(f"\U000023F3 [INFO] Iniciando agrupación de curvas por objeto...", flush=True)
     start_time = time.time()
     dataset = ds.dataset(DATASET_PATHS, format="parquet")
@@ -150,7 +141,6 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
                 continue
             if id_obj not in grouped_data:
                 grouped_data[id_obj] = group
-                class_counts[clase_norm] += 1
                 class_counts[clase_norm] += 1
         del df, batch
         gc.collect()

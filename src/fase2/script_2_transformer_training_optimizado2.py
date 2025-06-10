@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -6,21 +7,32 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report
 import matplotlib.pyplot as plt
 import argparse
-import os
 import pickle
 import numpy as np
 from tqdm.notebook import trange
+import time
 
 from Astroconformer.Astroconformer.Model.models import Astroconformer as AstroConformer
 
+from torch.cuda.amp import autocast, GradScaler
+
+# Define directories as constants
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "../../data")
+OUTPUTS_DIR = os.path.join(BASE_DIR, "../../outputs")
+
+scaler = GradScaler()  # Escalador global
+
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+    def __init__(self, alpha=1, gamma=2, reduction='mean', class_weights=None):
         super(FocalLoss, self).__init__()
+        # Remove class_weights as it's no longer needed
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
 
     def forward(self, inputs, targets):
+        # Remove class_weights usage
         ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
@@ -55,40 +67,152 @@ class AstroConformerClassifier(nn.Module):
         logits = self.classifier(self.dropout(out))
         return logits
 
-def train(model, loader, optimizer, criterion, device):
+def train1(model, loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0, 0, 0
     for x, y, mask in loader:
-        x, y, mask = x.to(device), y.to(device), mask.to(device)
+        start = time.time()
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
+
         optimizer.zero_grad()
-        outputs = model(x, mask)
-        loss = criterion(outputs, y)
-        if torch.isnan(loss): continue
+
+        # Reparar y limitar valores anómalos en x
+        x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+        x = torch.clamp(x, min=-5.0, max=5.0)
+        print(f"To device, optimizer y clamp: {time.time() - start:.4f}s")
+        
+        # Forward con autocast (float32 por compatibilidad con AstroConformer)
+        start = time.time()
+        with autocast(dtype=torch.float32):
+            outputs = model(x, mask)
+            loss = criterion(outputs, y)
+        print(f"Forward + loss time: {time.time() - start:.4f}s")
+
+        # Backward
+        start = time.time()
+        #scaler.scale(loss).backward()
+        #scaler.step(optimizer)
+        #scaler.update()
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
+        print(f"Backward pass time: {time.time() - start:.4f}s")
+
+        start = time.time()
+        total_loss += loss.detach()                      # ⚠️ sin .item()
         preds = outputs.argmax(1)
-        correct += (preds == y).sum().item()
+        correct += (preds == y).sum()                    # ⚠️ sin .item()
         total += y.size(0)
-    return total_loss / len(loader), correct / total
+        print(f"Sinc pass time: {time.time() - start:.4f}s")
+
+    #return total_loss / len(loader), correct.item() / total
+    return total_loss.item() / len(loader), correct.item() / total  # 👈 solo sincronizas aquí
+
+def train(model, loader, optimizer, criterion, device):
+    model.train()
+    total_loss, correct, total = 0.0, 0, 0
+    start = time.time()
+    for x, y, mask in loader:
+        #start = time.time()
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
+
+        optimizer.zero_grad()
+
+        # Reparar y limitar valores anómalos en x
+        x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+        x = torch.clamp(x, min=-5.0, max=5.0)
+        #print(f"To device, optimizer y clamp: {time.time() - start:.4f}s")
+
+        # Forward + loss con autocast (float16 por defecto en CUDA)
+        #start = time.time()
+        with autocast():
+            outputs = model(x, mask)
+            loss = criterion(outputs, y)
+        #print(f"Forward + loss time: {time.time() - start:.4f}s")
+
+        # Backward con GradScaler (evita NaNs y es más rápido en float16)
+        #start = time.time()
+        #scaler.scale(loss).backward()
+        #scaler.step(optimizer)
+        #scaler.update()
+        loss.backward()
+        optimizer.step()
+        #print(f"Backward pass ONLY: {time.time() - start:.4f}s")
+
+        # Acumulación de métricas sin sincronización
+        #start = time.time()
+        # Sin .item() por batch (esto es GPU friendly)
+        total_loss += loss.detach()
+        correct += (outputs.argmax(1) == y).sum()
+        total += y.size(0)
+        #print(f"Acumulacion metricas time: {time.time() - start:.4f}s")
+
+    print(f"[TRAIN] TIEMPO ÉPOCA: {time.time() - start:.4f}s")
+    #return total_loss / len(loader), correct / total
+    return total_loss.item() / len(loader), correct.item() / total
+
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate1(model, loader, criterion, device):
     model.eval()
     total_loss, correct, total = 0, 0, 0
     all_preds, all_labels = [], []
     for x, y, mask in loader:
-        x, y, mask = x.to(device), y.to(device), mask.to(device)
-        outputs = model(x, mask)
-        loss = criterion(outputs, y)
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
+
+        # Verificar si los datos contienen NaN
+        #assert not torch.isnan(x).any(), "Datos de entrada contienen NaN"
+        #assert not torch.isnan(y).any(), "Etiquetas contienen NaN"
+
+        with autocast():  # También se usa aquí para coherencia
+            outputs = model(x, mask)
+            loss = criterion(outputs, y)
+
         total_loss += loss.item()
         preds = outputs.argmax(1)
         correct += (preds == y).sum().item()
         total += y.size(0)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(y.cpu().numpy())
+
     report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
     return total_loss / len(loader), correct / total, report
+
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+    all_preds, all_labels = [], []
+    start = time.time()
+    for x, y, mask in loader:
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
+
+        # Reparar y limitar valores anómalos en x
+        x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+        x = torch.clamp(x, min=-5.0, max=5.0)
+
+        with autocast():  # Consistencia con train()
+            outputs = model(x, mask)
+            loss = criterion(outputs, y)
+
+        total_loss += loss.detach().cpu().item()
+        preds = outputs.argmax(1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(y.cpu().numpy())
+
+    report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
+    print(f"[VAL] TIEMPO ÉPOCA: {time.time() - start:.4f}s")    
+    return total_loss / len(loader), correct / total, report
+
 
 def export_model_to_onnx(model, output_path, input_size, device="cuda"):
     model.eval()
@@ -105,10 +229,12 @@ def export_model_to_onnx(model, output_path, input_size, device="cuda"):
     )
     print(f"Modelo exportado a ONNX en: {output_path}")
 
-def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=3e-5, freeze_encoder=False, patience=6, debug=False):
-    with open("data/train/label_encoder.pkl", "rb") as f:
-        label_encoder = pickle.load(f)
-
+def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3e-5, freeze_encoder=False, patience=6, debug=False):
+    # Activar optimización de CuDNN
+    torch.backends.cudnn.benchmark = True
+    
+    num_classes = len(label_encoder)
+    
     args = argparse.Namespace(
         input_dim=1, in_channels=1,
         encoder_dim=192,
@@ -122,16 +248,22 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=3e-
     )
 
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
+    model = torch.compile(model)
+
     class_weights = compute_class_weight("balanced", classes=np.unique([y.item() for _, y, _ in train_loader.dataset]),
                                          y=[y.item() for _, y, _ in train_loader.dataset])
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
 
-    criterion = FocalLoss(alpha=1.0, gamma=2.0)
+    # Use CrossEntropyLoss with class weights
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
 
     train_losses, val_losses, train_accuracies, val_accuracies = [], [], [], []
     best_val_loss = float("inf")
     epochs_no_improve = 0
+
+    print("Modelo en:", next(model.parameters()).device)
 
     for epoch in trange(1, epochs + 1 if not debug else 2, desc="Entrenamiento del modelo"):
         train_loss, train_acc = train(model, train_loader, optimizer, criterion, device)
@@ -149,8 +281,8 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=3e-
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "outputs/mejor_modelo_optimizado.pt")
-            print("💾 Guardado modelo mejorado en outputs/mejor_modelo_optimizado.pt")
+            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt"))
+            print(f"💾 Guardado modelo mejorado en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_optimizado.pt')}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -174,23 +306,25 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=50, lr=3e-
     plt.ylabel("Accuracy")
     plt.legend()
     plt.tight_layout()
-    plt.savefig("outputs/curvas_entrenamiento_optimizado2.png")
+    plt.savefig(os.path.join(OUTPUTS_DIR, "curvas_entrenamiento_optimizado2.png"))
     plt.show()
-
-    # Export the model to ONNX format
-    input_size = (1, args.input_dim, args.stride)  # Adjust according to your model
-    onnx_path = "outputs/modelo_optimizado.onnx"
-    export_model_to_onnx(model, onnx_path, input_size, device)
 
     return model
 
 if __name__ == "__main__":
+    # Activar optimización de CuDNN
+    torch.backends.cudnn.benchmark = True
+    
+    # Load label_encoder from file
+    with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "rb") as f:
+        label_encoder = pickle.load(f)
+
     # Define los argumentos del modelo
     args = argparse.Namespace(
         input_dim=1, in_channels=1,
         encoder_dim=192,
         hidden_dim=256,
-        output_dim=10,  # Numero de clases
+        output_dim=9,  # Numero de clases
         num_heads=8, num_layers=6,
         dropout=0.3, dropout_p=0.3,
         stride=20, kernel_size=3,
@@ -199,12 +333,7 @@ if __name__ == "__main__":
     )
 
     # Instancia el modelo
-    model = AstroConformerClassifier(args, num_classes=10).to("cuda")
+    model = AstroConformerClassifier(args, num_classes=9).to("cuda")
 
     # Carga los pesos del modelo entrenado
-    model.load_state_dict(torch.load("outputs/mejor_modelo_optimizado.pt"))
-
-    # Exporta el modelo a ONNX
-    input_size = (1, args.input_dim, args.stride)  # Ajustar segun modelo  
-    onnx_path = "outputs/modelo_optimizado.onnx"
-    export_model_to_onnx(model, onnx_path, input_size, device="cuda")
+    model.load_state_dict(torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt")))

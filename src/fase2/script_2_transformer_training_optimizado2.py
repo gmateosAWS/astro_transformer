@@ -11,9 +11,9 @@ import pickle
 import numpy as np
 from tqdm.notebook import trange
 import time
+import pandas as pd  # Add this import for saving the report as CSV
 
 from Astroconformer.Astroconformer.Model.models import Astroconformer as AstroConformer
-
 from torch.cuda.amp import autocast, GradScaler
 
 # Define directories as constants
@@ -24,15 +24,13 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, "../../outputs")
 scaler = GradScaler()  # Escalador global
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean', class_weights=None):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
         super(FocalLoss, self).__init__()
-        # Remove class_weights as it's no longer needed
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
 
     def forward(self, inputs, targets):
-        # Remove class_weights usage
         ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
@@ -51,7 +49,14 @@ class AstroConformerClassifier(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
         self.dropout = nn.Dropout(p=args.dropout)
-        self.classifier = nn.Linear(args.encoder_dim, num_classes)
+        #self.classifier = nn.Linear(args.encoder_dim, num_classes)
+        # Añadimos un head mas profundo
+        self.classifier = nn.Sequential(
+            nn.Linear(args.encoder_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, args.output_dim)
+        )
 
     def forward(self, x, mask):
         if x.dim() > 2:
@@ -180,6 +185,7 @@ def evaluate1(model, loader, criterion, device):
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(y.cpu().numpy())
 
+
     report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
     return total_loss / len(loader), correct / total, report
 
@@ -214,37 +220,30 @@ def evaluate(model, loader, criterion, device):
     return total_loss / len(loader), correct / total, report
 
 
-def export_model_to_onnx(model, output_path, input_size, device="cuda"):
-    model.eval()
-    dummy_input = torch.randn(*input_size).to(device)  # Define a test input
-    torch.onnx.export(
-        model,
-        dummy_input,
-        output_path,
-        export_params=True,
-        opset_version=12,
-        do_constant_folding=True,
-        input_names=["input"],
-        output_names=["output"]
-    )
-    print(f"Modelo exportado a ONNX en: {output_path}")
-
 def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3e-5, freeze_encoder=False, patience=6, debug=False):
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
-    
+
     num_classes = len(label_encoder)
-    
+
     args = argparse.Namespace(
-        input_dim=1, in_channels=1,
-        encoder_dim=192,
-        hidden_dim=256,
+        input_dim=1,
+        in_channels=1,
+        #encoder_dim=192,
+        encoder_dim=256,
+        #hidden_dim=256,
+        hidden_dim=384,
         output_dim=num_classes,
-        num_heads=8, num_layers=6,
+        num_heads=8,
+        #num_layers=6,
+        num_layers=8,
         dropout=0.3, dropout_p=0.3,
-        stride=20, kernel_size=3,
-        norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
-        timeshift=False, device=device
+        stride=20,
+        kernel_size=3,
+        norm="postnorm",
+        encoder=["mhsa_pro", "conv", "conv"],
+        timeshift=False,
+        device=device
     )
 
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
@@ -254,7 +253,6 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
                                          y=[y.item() for _, y, _ in train_loader.dataset])
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
 
-    # Use CrossEntropyLoss with class weights
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
@@ -290,6 +288,7 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
                 print(f"⏹️ Early stopping activado tras {patience} épocas sin mejora.")
                 break
 
+    # Plot training curves
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(train_losses, label="Train Loss")
@@ -309,12 +308,20 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
     plt.savefig(os.path.join(OUTPUTS_DIR, "curvas_entrenamiento_optimizado2.png"))
     plt.show()
 
+    # Print and save the classification report
+    print("\n📊 Classification Report:")
+    print(report)
+    report_df = pd.DataFrame(report).transpose()
+    report_csv_path = os.path.join(OUTPUTS_DIR, "classification_report.csv")
+    report_df.to_csv(report_csv_path, index=True)
+    print(f"📁 Reporte guardado en: {report_csv_path}")
+
     return model
 
 if __name__ == "__main__":
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
-    
+
     # Load label_encoder from file
     with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "rb") as f:
         label_encoder = pickle.load(f)

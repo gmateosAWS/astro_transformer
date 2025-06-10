@@ -12,6 +12,8 @@ from tqdm.notebook import trange
 import pandas as pd
 from Astroconformer.Astroconformer.Model.models import Astroconformer as AstroConformer
 from src.utils.focal_loss import FocalLoss
+from torch.cuda.amp import autocast
+import time
 
 # Define directories as constants
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,7 +28,14 @@ class AstroConformerClassifier(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
         self.dropout = nn.Dropout(p=args.dropout)
-        self.classifier = nn.Linear(args.encoder_dim, num_classes)
+        #self.classifier = nn.Linear(args.encoder_dim, num_classes)
+        # Añadimos un head mas profundo
+        self.classifier = nn.Sequential(
+            nn.Linear(args.encoder_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, args.output_dim)
+        )
 
     def forward(self, x, mask):
         if x.dim() > 2:
@@ -42,7 +51,7 @@ class AstroConformerClassifier(nn.Module):
         logits = self.classifier(self.dropout(out))
         return logits
 
-def evaluate(model, loader, criterion, device):
+def evaluate1(model, loader, criterion, device):
     model.eval()
     total_loss = 0
     all_preds, all_labels = [], []
@@ -55,29 +64,74 @@ def evaluate(model, loader, criterion, device):
         all_labels.extend(y.cpu().numpy())
     return total_loss / len(loader), all_preds, all_labels
 
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    all_preds, all_labels = [], []
+
+    for i, (x, y, mask) in enumerate(loader):
+        #start = time.time()
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
+
+        x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+        x = torch.clamp(x, min=-5.0, max=5.0)
+
+        with autocast():
+            outputs = model(x, mask)
+            loss = criterion(outputs, y)
+
+        total_loss += loss.detach().cpu().item()
+        all_preds.extend(outputs.argmax(1).detach().cpu().tolist())
+        all_labels.extend(y.detach().cpu().tolist())
+
+        if i % 20 == 0:
+            torch.cuda.empty_cache()
+        #print(f"⏱️ Tiempo eval: {time.time() - start:.4f}s")
+
+    return total_loss / len(loader), all_preds, all_labels
+
+
 def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patience=4, debug=False,
          freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0):
-
+    # Activar optimización de CuDNN
+    torch.backends.cudnn.benchmark = True
+    
     with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "rb") as f:
         label_encoder = pickle.load(f)
     class_names = list(label_encoder.keys())
 
     args = argparse.Namespace(
-        input_dim=1, in_channels=1,
-        encoder_dim=192, hidden_dim=256,
+        input_dim=1,
+        in_channels=1,
+        encoder_dim=256,
+        hidden_dim=384,
         output_dim=num_classes,
-        num_heads=8, num_layers=6,
+        num_heads=8,
+        num_layers=8,
         dropout=0.3, dropout_p=0.3,
-        stride=20, kernel_size=3,
-        norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
-        timeshift=False, device=device
+        stride=20,
+        kernel_size=3,
+        norm="postnorm",
+        encoder=["mhsa_pro", "conv", "conv"],
+        timeshift=False,
+        device=device
     )
 
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
 
     # Carga los pesos del modelo entrenado
     state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt"), map_location=device)
+    # Si el modelo fue compilado, puede tener prefijo _orig_mod.
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
+    model.to(device)
+    # ✅ Compilar el modelo para mejorar rendimiento (solo una vez)
+    model = torch.compile(model)
     print(f"✅ Modelo cargado desde {os.path.join(OUTPUTS_DIR, 'mejor_modelo_optimizado.pt')}")
 
     optimizer = optim.AdamW([
@@ -85,41 +139,86 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
         {"params": model.classifier.parameters(), "lr": head_lr}
     ], weight_decay=1e-4)
 
-    criterion = FocalLoss(gamma=gamma, reduction="mean", label_smoothing=0.1)
+    #criterion = FocalLoss(gamma=gamma, reduction="mean", label_smoothing=0.1)
+    # El label_smoothing=0.1 puede estar difuminando las etiquetas reales, afectando a la capacidad del modelo de tomar decisiones claras. 
+    # Esto es útil cuando hay overfitting, pero aquí hay infraajuste (underfitting).
+    # Quitar label_smoothing hará que el modelo se esfuerce más en acertar la clase correcta en vez de repartir confianza difusa.
+    criterion = FocalLoss(gamma=gamma, reduction="mean")
 
     train_losses, val_losses, train_accs, val_accs = [], [], [], []
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
     print("Modelo en:", next(model.parameters()).device)
-    
+
     for epoch in trange(1, epochs + 1 if not debug else 2, desc="Fine-tuning"):
+        epoch_start = time.time()
         model.train()
         total_loss, correct, total = 0, 0, 0
 
         if freeze_encoder and epoch == freeze_epochs:
             for param in model.encoder.parameters():
                 param.requires_grad = True
-            print(f"🔓 Encoder descongelado en epoch {epoch}")
+            # ⚠️ Reconfigura el optimizer para aplicar correctamente el learning rate al encoder ya activo
+            optimizer = optim.AdamW([
+                {"params": model.encoder.parameters(), "lr": encoder_lr},
+                {"params": model.classifier.parameters(), "lr": head_lr}
+            ], weight_decay=1e-4)
+            print(f"🔓 Encoder descongelado y optimizador actualizado en epoch {epoch}")
 
-        for x, y, mask in train_loader:
-            x, y, mask = x.to(device), y.to(device), mask.to(device)
+        t_train = time.time()
+        for i, (x, y, mask) in enumerate(train_loader):
+            #batch_start = time.time()
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
+
+            # Reparar y limitar valores anómalos en x
+            x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+            x = torch.clamp(x, min=-5.0, max=5.0)
+
             optimizer.zero_grad()
-            outputs = model(x, mask)
-            loss = criterion(outputs, y)
-            if torch.isnan(loss): continue
+
+            try:
+                with autocast():
+                    outputs = model(x, mask)
+                    loss = criterion(outputs, y)
+            except RuntimeError as e:
+                print(f"⚠️ Error en forward/backward: {e}")
+                torch.cuda.empty_cache()
+                continue
+            #print(f"⏱️ Tiempo batch start: {time.time() - batch_start:.4f}s")
+
+            #back_start = time.time()
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
-            correct += (outputs.argmax(1) == y).sum().item()
+
+            total_loss += loss.detach()
+            correct += (outputs.argmax(1) == y).sum()
             total += y.size(0)
+            #print(f"⏱️ Tiempo backward: {time.time() - back_start:.4f}s")
 
-        train_losses.append(total_loss / len(train_loader))
-        train_accs.append(correct / total)
+            # 🧹 Liberar fragmentación cada 20 batches
+            #if i % 20 == 0:
+            #    torch.cuda.empty_cache()
 
+            torch.cuda.synchronize()
+            #print(f"⏱️ Tiempo batch: {time.time() - start:.4f}s")
+
+        if total == 0:
+            print(f"⚠️ Epoch {epoch}: no se procesaron muestras. Posible error en el dataloader o en el modelo.")
+            train_losses.append(0)
+            train_accs.append(0)
+            continue
+        train_losses.append(total_loss.cpu().item() / len(train_loader))
+        train_accs.append(correct.cpu().item() / total)
+        print(f"⏱️ Tiempo entrenamiento: {time.time() - t_train:.2f}s")
+
+        t_eval = time.time()
         val_loss, val_preds, val_true = evaluate(model, val_loader, criterion, device)
         val_losses.append(val_loss)
         val_accs.append(accuracy_score(val_true, val_preds))
+        print(f"🔍 Tiempo evaluación: {time.time() - t_eval:.2f}s")
 
         print(f"\n🧪 Epoch {epoch}/{epochs}")
         print(f"Train loss: {train_losses[-1]:.4f}, Val loss: {val_loss:.4f}")
@@ -127,14 +226,15 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.pt"))
-            print(f"💾 Guardado mejor modelo fine-tuned en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_finetuned_optimizado2.pt')}")
+            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.pt"))
+            print(f"💾 Guardado mejor modelo fine-tuned en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_finetuned_optimizado.pt')}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
                 print(f"⏹️ Fine-tuning detenido tras {patience} épocas sin mejora.")
                 break
+        print(f"⏱️ Tiempo época: {time.time() - epoch_start:.2f}s")
 
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
@@ -154,7 +254,7 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUTS_DIR, "curvas_finetuning_optimizado2.png"))
+    plt.savefig(os.path.join(OUTPUTS_DIR, "curvas_finetuning_optimizado.png"))
     plt.show()
 
     cm = confusion_matrix(val_true, val_preds, labels=sorted(set(val_true) | set(val_preds)))
@@ -163,7 +263,7 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     disp.plot(xticks_rotation=45, cmap="Blues")
     plt.title("Matriz de Confusión (Fine-tuning)")
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUTS_DIR, "matriz_confusion_finetuning_optimizado2.png"))
+    plt.savefig(os.path.join(OUTPUTS_DIR, "matriz_confusion_finetuning_optimizado.png"))
     plt.show()
 
     errores = []
@@ -179,14 +279,24 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     df_errores.to_csv(os.path.join(OUTPUTS_DIR, "errores_mal_clasificados.csv"), index=False)
     print(f"💾 Guardado CSV con errores: {os.path.join(OUTPUTS_DIR, 'errores_mal_clasificados.csv')}")
 
+    report = classification_report(val_true, val_preds, target_names=class_names, output_dict=True, zero_division=0)
+    df_report = pd.DataFrame(report).transpose()
+    df_report.to_csv(os.path.join(OUTPUTS_DIR, "class_report_finetuning_optimizado.csv"))
+    print("📄 Reporte de clasificación guardado en class_report_finetuning_optimizado.csv")
+
+
     if debug:
         print("🛑 Debug activo: fine-tuning detenido tras primera época.")
 
     # Export the fine-tuned model to ONNX
-    input_size = (1, args.input_dim, args.stride)  # Adjust according to your model
-    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.onnx")
+    input_size = (1, 1, 25000)
+    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.onnx")
     dummy_input = torch.randn(*input_size).to(device)
+
+    # Desactiva la compilación para trazabilidad ONNX
+    model = torch._dynamo.disable(model)
     model.eval()
+
     torch.onnx.export(
         model,
         dummy_input,

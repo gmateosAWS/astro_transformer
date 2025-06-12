@@ -59,7 +59,7 @@ discard_reasons = {
     "short_curve": 0,
     "nan_or_inf_after_norm": 0,
     "unknown_class": 0,
-    "unknown_class": 0,
+    "removed_class": 0,
     "ok": 0
 }
 MIN_POINTS = 30
@@ -81,7 +81,7 @@ class LightCurveDataset(Dataset):
             torch.tensor(self.masks[idx], dtype=torch.float32),
         )
 
-def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path="data/train/grouped_data.pkl"):
+def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path="data/train/grouped_data.pkl", ids_refuerzo=None):
     # Si existe el cache, cargarlo y devolverlo
     if os.path.exists(cache_path):
         print(f"\U0001F4BE [INFO] Cargando agrupación de curvas desde cache: {cache_path}", flush=True)
@@ -129,17 +129,34 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
         df["id"] = df[df_id].astype(str)
         for id_obj, group in df.groupby("id"):
             clase = group[df_clase].iloc[0]
+            # Crear y normalizar clase_norm
             clase_norm = normalize_label(clase)
-            if not isinstance(clase, str) or clase.strip() == "" or clase_norm.lower() == "unknown":
-                discard_reasons["unknown_class"] += 1
-            clase_norm = normalize_label(clase)
+
+            # Validar que la clase sea un string válido y no sea "unknown"
             if not isinstance(clase, str) or clase.strip() == "" or clase_norm.lower() == "unknown":
                 discard_reasons["unknown_class"] += 1
                 continue
+
+            # Excluir clases con max_per_class_override=0 (clases que se quieren eliminar)
+            if max_per_class_override.get(clase_norm, max_per_class_global) == 0:
+                discard_reasons["removed_class"] += 1
+                continue
+
+            # Controlar si ya se ha alcanzado el límite por clase
             max_limit = max_per_class_override.get(clase_norm, max_per_class_global)
             if max_limit is not None and class_counts[clase_norm] >= max_limit:
+                # Incluir IDs de refuerzo incluso si se supera el límite
+                if ids_refuerzo and id_obj in ids_refuerzo:
+                    grouped_data[id_obj] = group
+                    class_counts[clase_norm] += 1
                 continue
+
+            # Control de duplicados 
             if id_obj not in grouped_data:
+                grouped_data[id_obj] = group
+                class_counts[clase_norm] += 1
+            # Forzar inclusión de IDs de refuerzo, pero evitar duplicados
+            if ids_refuerzo and id_obj in ids_refuerzo and id_obj not in grouped_data:
                 grouped_data[id_obj] = group
                 class_counts[clase_norm] += 1
         del df, batch
@@ -164,7 +181,7 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
     return grouped_data
   
   
-def process_single_curve(group, seq_length, device):
+def process_single_curve(group, seq_length, device, is_refuerzo=False):
     id_objeto, df = group
     # Usar mapeo robusto de columnas
     mag_col = find_column(df.columns, "magnitud")
@@ -173,6 +190,7 @@ def process_single_curve(group, seq_length, device):
     magnitudes_str = df[mag_col].astype(str).str.replace('>', '', regex=False).str.strip()
     magnitudes = pd.to_numeric(magnitudes_str, errors='coerce').to_numpy()
 
+    # Normalizar la clase usando el diccionario común
     clase = normalize_label(df[clase_col].iloc[0])
     if clase.lower() == "unknown":
         discard_reasons["unknown_class"] += 1
@@ -182,7 +200,6 @@ def process_single_curve(group, seq_length, device):
     magnitudes_str = df[mag_col].astype(str).str.replace('>', '', regex=False).str.strip()
     magnitudes = pd.to_numeric(magnitudes_str, errors='coerce').to_numpy()
 
-    clase = normalize_label(df[clase_col].iloc[0])
     if clase.lower() == "unknown":
         discard_reasons["unknown_class"] += 1
         return None
@@ -190,6 +207,16 @@ def process_single_curve(group, seq_length, device):
     if np.all(np.isnan(magnitudes)):
         discard_reasons["all_nan"] += 1
         return None
+
+    if is_refuerzo:
+        # No aplicar filtros excluyentes a objetos de refuerzo
+        magnitudes_norm = np.clip(magnitudes_norm, -1000, 1000)
+        attention_mask = np.zeros(seq_length)
+        effective_length = min(len(magnitudes_norm), seq_length)
+        padded_curve = np.zeros(seq_length)
+        padded_curve[:effective_length] = magnitudes_norm[:effective_length]
+        attention_mask[:effective_length] = 1
+        return padded_curve, clase, attention_mask
 
     if len(magnitudes) < MIN_POINTS:
         discard_reasons["short_curve"] += 1
@@ -209,15 +236,12 @@ def process_single_curve(group, seq_length, device):
         return None
 
     magnitudes_norm = np.clip(magnitudes_norm, -1000, 1000)
-
     attention_mask = np.zeros(seq_length)
     effective_length = min(len(magnitudes_norm), seq_length)
     padded_curve = np.zeros(seq_length)
     padded_curve[:effective_length] = magnitudes_norm[:effective_length]
     attention_mask[:effective_length] = 1
 
-    # Normalizar la clase usando el diccionario común
-    clase = normalize_label(df[clase_col].iloc[0])
     discard_reasons["ok"] += 1
     return padded_curve, clase, attention_mask
 
@@ -230,13 +254,20 @@ def main(
     device="cpu",
     max_per_class=None,
     max_per_class_override=None,
-    parquet_dir="data/processed"
+    parquet_dir="data/processed",
+    errores_csv_path=None
 ):
     print("\U0001F4C2 Cargando datos en lotes con PyArrow...", flush=True)
     global_start = time.time()
 
     if max_per_class_override is None:
         max_per_class_override = {}
+
+    ids_refuerzo = set()
+    if errores_csv_path:
+        errores_df = pd.read_csv(errores_csv_path)
+        ids_refuerzo = set(errores_df["indice"].astype(str))
+        print(f"\U0001F4C2 [INFO] IDs de refuerzo cargados: {len(ids_refuerzo)}")
 
     # --- Agrupación de datos ---
     t0 = time.time()
@@ -245,24 +276,28 @@ def main(
         max_per_class_global=max_per_class,
         max_per_class_override=max_per_class_override,
         batch_size=parquet_batch_size,
-        cache_path="data/train/grouped_data.pkl"
+        cache_path="data/train/grouped_data.pkl",
+        ids_refuerzo=ids_refuerzo
     )
     t1 = time.time()
     print(f"\U000023F3 [INFO] Tiempo en agrupación de datos: {t1-t0:.1f} segundos", flush=True)
 
+    # Convertir grouped_data a listas para procesar
     grouped_list = list(grouped_data.items())
     random.shuffle(grouped_list)
 
     print(f"\U0001F680 Procesando {len(grouped_list)} curvas en paralelo usando {num_workers} CPUs...", flush=True)
     t2 = time.time()
+    # Procesar curvas en paralelo
     with Pool(num_workers) as pool:
         results = pool.starmap(
             process_single_curve,
-            [(group, seq_length, device) for group in grouped_list]
+            [(group, seq_length, device, id_obj in ids_refuerzo) for id_obj, group in grouped_list]
         )
     t3 = time.time()
     print(f"\U000023F3 [INFO] Tiempo en procesamiento paralelo: {t3-t2:.1f} segundos", flush=True)
 
+    # Filtrar resultados válidos
     results = [r for r in results if r is not None]
     filtered = [r for r in results if not (
         np.isnan(r[0]).any() or np.isinf(r[0]).any() or
@@ -272,14 +307,7 @@ def main(
     print(f"\U0001F50B [INFO] Curvas válidas tras filtrado: {len(filtered)}", flush=True)
 
     # Excluir unknown del label_encoder y de las etiquetas
-    # Excluir unknown del label_encoder y de las etiquetas
     sequences, labels, masks = zip(*filtered)
-    filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
-    sequences = [sequences[i] for i in filtered_indices]
-    labels = [labels[i] for i in filtered_indices]
-    masks = [masks[i] for i in filtered_indices]
-
-    # Crear label_encoder antes de codificar
     filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
     sequences = [sequences[i] for i in filtered_indices]
     labels = [labels[i] for i in filtered_indices]
@@ -294,18 +322,17 @@ def main(
     sequences = np.array(sequences, dtype=np.float16)
     masks = np.array(masks, dtype=np.float16)
 
+    # Mostrar el uso de memoria de los arrays
     print(f"[INFO] Uso de memoria de sequences: {sequences.nbytes/1024/1024:.2f} MB")
     print(f"[INFO] Uso de memoria de masks: {masks.nbytes/1024/1024:.2f} MB")
     print(f"[INFO] Uso de memoria de labels: {encoded_labels.nbytes/1024/1024:.2f} MB")
-    encoded_labels = np.array([label_encoder[label] for label in labels], dtype=np.int32)
 
-    # Convertir a float16 para ahorrar memoria
-    sequences = np.array(sequences, dtype=np.float16)
-    masks = np.array(masks, dtype=np.float16)
-
-    print(f"[INFO] Uso de memoria de sequences: {sequences.nbytes/1024/1024:.2f} MB")
-    print(f"[INFO] Uso de memoria de masks: {masks.nbytes/1024/1024:.2f} MB")
-    print(f"[INFO] Uso de memoria de labels: {encoded_labels.nbytes/1024/1024:.2f} MB")
+    # ADVERTENCIA: El uso de memoria será muy alto con 85k curvas x 25k puntos, incluso en float16 (~40GB solo para sequences)
+    # Si tienes problemas de memoria, considera guardar los arrays en disco y usar un Dataset que lea bajo demanda.
+    print(f"[INFO] N curvas: {len(sequences)}, seq_length: {sequences[0].shape[0] if len(sequences) > 0 else 0}")
+    print(f"[INFO] Estimación memoria sequences (float16): {len(sequences)*seq_length*2/1024/1024/1024:.2f} GB")
+    print(f"[INFO] Estimación memoria sequences (float32): {len(sequences)*seq_length*4/1024/1024/1024:.2f} GB")
+    print(f"[INFO] Si tienes problemas de memoria, considera usar almacenamiento en disco y Dataset bajo demanda.")
 
     os.makedirs("data/train", exist_ok=True)
     print(f"\U0001F4BE [INFO] Guardando label_encoder.pkl...", flush=True)
@@ -325,33 +352,10 @@ def main(
     })
     df_debug.to_csv("data/train/debug_clases_codificadas.csv", index=False)
 
-    # ADVERTENCIA: El uso de memoria será muy alto con 85k curvas x 25k puntos, incluso en float16 (~40GB solo para sequences)
-    # Si tienes problemas de memoria, considera guardar los arrays en disco y usar un Dataset que lea bajo demanda.
-    # Aquí solo se muestra el cálculo de memoria y una advertencia.
-    print(f"[INFO] N curvas: {len(sequences)}, seq_length: {sequences[0].shape[0] if len(sequences) > 0 else 0}")
-    print(f"[INFO] Estimación memoria sequences (float16): {len(sequences)*seq_length*2/1024/1024/1024:.2f} GB")
-    print(f"[INFO] Estimación memoria sequences (float32): {len(sequences)*seq_length*4/1024/1024/1024:.2f} GB")
-    print(f"[INFO] Si tienes problemas de memoria, considera usar almacenamiento en disco y Dataset bajo demanda.")
-
-    # ADVERTENCIA: El uso de memoria será muy alto con 85k curvas x 25k puntos, incluso en float16 (~40GB solo para sequences)
-    # Si tienes problemas de memoria, considera guardar los arrays en disco y usar un Dataset que lea bajo demanda.
-    # Aquí solo se muestra el cálculo de memoria y una advertencia.
-    print(f"[INFO] N curvas: {len(sequences)}, seq_length: {sequences[0].shape[0] if len(sequences) > 0 else 0}")
-    print(f"[INFO] Estimación memoria sequences (float16): {len(sequences)*seq_length*2/1024/1024/1024:.2f} GB")
-    print(f"[INFO] Estimación memoria sequences (float32): {len(sequences)*seq_length*4/1024/1024/1024:.2f} GB")
-    print(f"[INFO] Si tienes problemas de memoria, considera usar almacenamiento en disco y Dataset bajo demanda.")
-
-    sequences = np.array(sequences)
-    encoded_labels = np.array(encoded_labels)
-    masks = np.array(masks)
-
     print(f"\U0001F4DD [INFO] Realizando split train/val/test...", flush=True)
-    # train_idx, val_idx = train_test_split(
-    #     np.arange(len(encoded_labels)),
-    #     test_size=0.2,
-    #     stratify=encoded_labels,
-    #     random_state=42
-    # )
+
+    # Crear índices de refuerzo
+    refuerzo_indices = [i for i, (id_obj, _) in enumerate(grouped_list) if id_obj in ids_refuerzo]
 
     # División inicial: train + val/test
     train_val_idx, test_idx = train_test_split(
@@ -369,11 +373,30 @@ def main(
         random_state=42
     )
 
-    train_dataset = LightCurveDataset(sequences[train_idx], encoded_labels[train_idx], masks[train_idx])
-    val_dataset = LightCurveDataset(sequences[val_idx], encoded_labels[val_idx], masks[val_idx])
-    test_dataset = LightCurveDataset(sequences[test_idx], encoded_labels[test_idx], masks[test_idx])
+    # Asegurar que los IDs de refuerzo están en train
+    train_idx = set(train_idx)  # Usar un set para evitar duplicados
+    train_idx.update(refuerzo_indices)  # Añadir índices de refuerzo
+    train_idx = np.array(list(train_idx))  # Convertir de nuevo a array
+
+    # Crear datasets
+    train_dataset = LightCurveDataset(
+        [sequences[i] for i in train_idx],
+        [encoded_labels[i] for i in train_idx],
+        [masks[i] for i in train_idx]
+    )
+    val_dataset = LightCurveDataset(
+        [sequences[i] for i in val_idx],
+        [encoded_labels[i] for i in val_idx],
+        [masks[i] for i in val_idx]
+    )
+    test_dataset = LightCurveDataset(
+        [sequences[i] for i in test_idx],
+        [encoded_labels[i] for i in test_idx],
+        [masks[i] for i in test_idx]
+    )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
+    print(f"\U0001F4CA [INFO] IDs de refuerzo incluidos en train: {len(refuerzo_indices)}")
 
     train_loader = DataLoader(train_dataset, batch_size=dataloader_batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=dataloader_batch_size, shuffle=False)
@@ -381,9 +404,9 @@ def main(
 
     # Guardar datasets serializados para no perderlos al reiniciar el kernel y poder subirlos a SageMaker
     print(f"\U0001F4BE [INFO] Guardando datasets serializados...", flush=True)
-    torch.save(train_loader.dataset, "data/train/train_dataset.pt")
-    torch.save(val_loader.dataset, "data/train/val_dataset.pt")
-    torch.save(test_loader.dataset, "data/train/test_dataset.pt")
+    torch.save(train_loader.dataset, "data/train/train_dataset_ref.pt")
+    torch.save(val_loader.dataset, "data/train/val_dataset_ref.pt")
+    torch.save(test_loader.dataset, "data/train/test_dataset_ref.pt")
 
     print("\n\U0001F4C9 Resumen de curvas descartadas:")
     for reason, count in discard_reasons.items():

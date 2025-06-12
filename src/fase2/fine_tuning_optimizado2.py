@@ -293,20 +293,84 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.onnx")
     dummy_input = torch.randn(*input_size).to(device)
 
-    # Desactiva la compilación para trazabilidad ONNX
-    model = torch._dynamo.disable(model)
-    model.eval()
+    # Properly disable compilation for ONNX export
+    decompiled_model = torch._dynamo.disable(model)
+    decompiled_model.eval()
 
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_path,
-        export_params=True,
-        opset_version=12,
-        do_constant_folding=True,
-        input_names=["input"],
-        output_names=["output"]
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            decompiled_model,
+            dummy_input,
+            onnx_path,
+            export_params=True,
+            opset_version=12,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["output"]
+        )
     print(f"✅ Modelo fine-tuned exportado a ONNX en: {onnx_path}")
 
     return model
+
+def export_model_to_onnx(device="cuda"):
+    """
+    Exporta el modelo fine-tuned al formato ONNX para su visualización y despliegue.
+    """
+    import torch.onnx
+
+    # Carga del codificador de etiquetas
+    with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "rb") as f:
+        label_encoder = pickle.load(f)
+    num_classes = len(label_encoder)
+
+    # Argumentos del modelo (deben coincidir con los usados en entrenamiento)
+    args = argparse.Namespace(
+        input_dim=1,
+        in_channels=1,
+        encoder_dim=256,
+        hidden_dim=384,
+        output_dim=num_classes,
+        num_heads=8,
+        num_layers=8,
+        dropout=0.3, dropout_p=0.3,
+        stride=20,
+        kernel_size=3,
+        norm="postnorm",
+        encoder=["mhsa_pro", "conv", "conv"],
+        timeshift=False,
+        device=device
+    )
+
+    # Inicializa el modelo y carga pesos
+    model = AstroConformerClassifier(args, num_classes).to(device)
+    state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.pt"), map_location=device)
+
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # Preparar entrada dummy
+    dummy_input = (torch.randn(1, 1, 25000).to(device), torch.ones(1, 25000).bool().to(device))  # (x, mask)
+
+    # Exportar a ONNX
+    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.onnx")
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            dummy_input,
+            onnx_path,
+            input_names=["input", "mask"],
+            output_names=["output"],
+            opset_version=16,
+            export_params=True,
+            do_constant_folding=True,
+            dynamic_axes={
+                "input": {0: "batch_size", 2: "sequence_length"},
+                "mask": {0: "batch_size", 1: "sequence_length"},
+                "output": {0: "batch_size"}
+            }
+        )
+    print(f"✅ Modelo exportado a ONNX en: {onnx_path}")

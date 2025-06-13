@@ -21,21 +21,10 @@ import sys
 from src.utils.normalization_dict import normalize_label
 from src.utils.column_mapping import COLUMN_MAPPING, map_column_name, find_column
 
-# Selección automática de paths según entorno
-def detect_aws_env():
-    # Detecta SageMaker/Jupyter en AWS por variables de entorno y paths típicos
-    if "SM_HOSTS" in os.environ or "SAGEMAKER_JOB_NAME" in os.environ:
-        return True
-    if "HOME" in os.environ and "SageMaker" in os.environ["HOME"]:
-        return True
-    if "JPY_PARENT_PID" in os.environ and "SageMaker" in os.getcwd():
-        return True
-    return False
-
-if detect_aws_env() or os.environ.get("RUN_ENV", "").lower() == "aws":
-    from src.utils.dataset_paths import DATASET_PATHS_AWS as DATASET_PATHS
-else:
-    from src.utils.dataset_paths import DATASET_PATHS
+# Define directories as constants
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "../../data")
+OUTPUTS_DIR = os.path.join(BASE_DIR, "../../outputs")
 
 # Selección automática de paths según entorno
 def detect_aws_env():
@@ -81,7 +70,10 @@ class LightCurveDataset(Dataset):
             torch.tensor(self.masks[idx], dtype=torch.float32),
         )
 
-def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path="data/train/grouped_data.pkl", ids_refuerzo=None):
+def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path=None, ids_refuerzo=None):
+    # Set default cache_path using DATA_DIR
+    if cache_path is None:
+        cache_path = os.path.join(DATA_DIR, "train/grouped_data.pkl")
     # Si existe el cache, cargarlo y devolverlo
     if os.path.exists(cache_path):
         print(f"\U0001F4BE [INFO] Cargando agrupación de curvas desde cache: {cache_path}", flush=True)
@@ -138,7 +130,7 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
                 continue
 
             # Excluir clases con max_per_class_override=0 (clases que se quieren eliminar)
-            if max_per_class_override.get(clase_norm, max_per_class_global) == 0:
+            if max_per_class_override is not None and max_per_class_override.get(clase_norm, max_per_class_global) == 0:
                 discard_reasons["removed_class"] += 1
                 continue
 
@@ -173,15 +165,10 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
     with open(cache_path, "wb") as f:
         pickle.dump(grouped_data, f)
     print(f"\U0001F4BE [INFO] Agrupación guardada en cache: {cache_path}", flush=True)
-    # Guardar agrupación en cache
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    with open(cache_path, "wb") as f:
-        pickle.dump(grouped_data, f)
-    print(f"\U0001F4BE [INFO] Agrupación guardada en cache: {cache_path}", flush=True)
     return grouped_data
   
   
-def process_single_curve(group, seq_length, device, is_refuerzo=False):
+def process_single_curve(group, seq_length, device):
     id_objeto, df = group
     # Usar mapeo robusto de columnas
     mag_col = find_column(df.columns, "magnitud")
@@ -203,21 +190,11 @@ def process_single_curve(group, seq_length, device, is_refuerzo=False):
     if clase.lower() == "unknown":
         discard_reasons["unknown_class"] += 1
         return None
-    
+        
     if np.all(np.isnan(magnitudes)):
         discard_reasons["all_nan"] += 1
         return None
-
-    if is_refuerzo:
-        # No aplicar filtros excluyentes a objetos de refuerzo
-        magnitudes_norm = np.clip(magnitudes_norm, -1000, 1000)
-        attention_mask = np.zeros(seq_length)
-        effective_length = min(len(magnitudes_norm), seq_length)
-        padded_curve = np.zeros(seq_length)
-        padded_curve[:effective_length] = magnitudes_norm[:effective_length]
-        attention_mask[:effective_length] = 1
-        return padded_curve, clase, attention_mask
-
+        
     if len(magnitudes) < MIN_POINTS:
         discard_reasons["short_curve"] += 1
         return None
@@ -227,6 +204,7 @@ def process_single_curve(group, seq_length, device, is_refuerzo=False):
         discard_reasons["low_std"] += 1
         return None
 
+    # Initialize magnitudes_norm before referencing it
     median = np.median(magnitudes)
     iqr = np.subtract(*np.percentile(magnitudes, [75, 25]))
     magnitudes_norm = (magnitudes - median) / iqr if iqr != 0 else magnitudes - median
@@ -254,7 +232,6 @@ def main(
     device="cpu",
     max_per_class=None,
     max_per_class_override=None,
-    parquet_dir="data/processed",
     errores_csv_path=None
 ):
     print("\U0001F4C2 Cargando datos en lotes con PyArrow...", flush=True)
@@ -276,7 +253,7 @@ def main(
         max_per_class_global=max_per_class,
         max_per_class_override=max_per_class_override,
         batch_size=parquet_batch_size,
-        cache_path="data/train/grouped_data.pkl",
+        cache_path=os.path.join(DATA_DIR, "train/grouped_data.pkl"),
         ids_refuerzo=ids_refuerzo
     )
     t1 = time.time()
@@ -292,7 +269,7 @@ def main(
     with Pool(num_workers) as pool:
         results = pool.starmap(
             process_single_curve,
-            [(group, seq_length, device, id_obj in ids_refuerzo) for id_obj, group in grouped_list]
+            [((id_obj, group), seq_length, device) for id_obj, group in grouped_list]
         )
     t3 = time.time()
     print(f"\U000023F3 [INFO] Tiempo en procesamiento paralelo: {t3-t2:.1f} segundos", flush=True)
@@ -336,8 +313,8 @@ def main(
 
     os.makedirs("data/train", exist_ok=True)
     print(f"\U0001F4BE [INFO] Guardando label_encoder.pkl...", flush=True)
-    with open("data/train/label_encoder.pkl", "wb") as f:
-        pickle.dump(label_encoder, f)
+    with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "wb") as output_file:
+        pickle.dump(label_encoder, output_file)
 
     counter = Counter(encoded_labels)
     print("\U0001F4CA Recuento por clase codificada:")
@@ -403,16 +380,21 @@ def main(
     test_loader = DataLoader(test_dataset, batch_size=dataloader_batch_size, shuffle=False)
 
     # Guardar datasets serializados para no perderlos al reiniciar el kernel y poder subirlos a SageMaker
-    print(f"\U0001F4BE [INFO] Guardando datasets serializados...", flush=True)
-    torch.save(train_loader.dataset, "data/train/train_dataset_ref.pt")
-    torch.save(val_loader.dataset, "data/train/val_dataset_ref.pt")
-    torch.save(test_loader.dataset, "data/train/test_dataset_ref.pt")
+    print(f"\U0001F4BE [INFO] Guardando datasets serializados en formato .pt...", flush=True)
+    # Save datasets in smaller chunks using torch.save
+    def save_large_object(obj, filepath):
+        torch.save(obj, filepath)
+    save_large_object(train_loader.dataset, os.path.join(DATA_DIR, "train/train_dataset_ref.pt"))
+    save_large_object(val_loader.dataset, os.path.join(DATA_DIR, "train/val_dataset_ref.pt"))
+    save_large_object(test_loader.dataset, os.path.join(DATA_DIR, "train/test_dataset_ref.pt"))
 
     print("\n\U0001F4C9 Resumen de curvas descartadas:")
     for reason, count in discard_reasons.items():
         print(f"\U0001F538 {reason.replace('_', ' ').capitalize():30}: {count}")
 
-    pd.DataFrame(discard_reasons.items(), columns=["motivo", "cantidad"]).to_csv("data/train/debug_descartes.csv", index=False)
+    pd.DataFrame(discard_reasons.items(), columns=["motivo", "cantidad"]).to_csv(
+        os.path.join(OUTPUTS_DIR, "debug_descartes.csv"), index=False
+    )
     total_time = time.time() - global_start
     print(f"\U00002705 Datos preparados como secuencias normalizadas y máscaras.")
     print(f"\U000023F3 [INFO] Tiempo total de ejecución: {total_time/60:.2f} minutos ({total_time:.1f} segundos)", flush=True)

@@ -331,7 +331,7 @@ if __name__ == "__main__":
         input_dim=1, in_channels=1,
         encoder_dim=192,
         hidden_dim=256,
-        output_dim=9,  # Numero de clases
+        output_dim=7,  # Numero de clases
         num_heads=8, num_layers=6,
         dropout=0.3, dropout_p=0.3,
         stride=20, kernel_size=3,

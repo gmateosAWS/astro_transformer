@@ -94,15 +94,14 @@ def evaluate(model, loader, criterion, device):
     return total_loss / len(loader), all_preds, all_labels
 
 
-def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patience=4, debug=False,
+def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optimizado.pt", device="cuda", epochs=20, patience=4, debug=False,
          freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0):
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
-    
-    with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "rb") as f:
-        label_encoder = pickle.load(f)
-    class_names = list(label_encoder.keys())
 
+    num_classes = len(label_encoder)
+    class_names = list(label_encoder.keys())
+    
     args = argparse.Namespace(
         input_dim=1,
         in_channels=1,
@@ -123,7 +122,8 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
 
     # Carga los pesos del modelo entrenado
-    state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt"), map_location=device)
+    model_path = os.path.join(OUTPUTS_DIR, model_name)
+    state_dict = torch.load(model_path, map_location=device)    
     # Si el modelo fue compilado, puede tener prefijo _orig_mod.
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
         print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
@@ -132,7 +132,7 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     model.to(device)
     # ✅ Compilar el modelo para mejorar rendimiento (solo una vez)
     model = torch.compile(model)
-    print(f"✅ Modelo cargado desde {os.path.join(OUTPUTS_DIR, 'mejor_modelo_optimizado.pt')}")
+    print(f"✅ Modelo cargado desde {model_path}")
 
     optimizer = optim.AdamW([
         {"params": model.encoder.parameters(), "lr": encoder_lr},
@@ -143,7 +143,10 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
     # El label_smoothing=0.1 puede estar difuminando las etiquetas reales, afectando a la capacidad del modelo de tomar decisiones claras. 
     # Esto es útil cuando hay overfitting, pero aquí hay infraajuste (underfitting).
     # Quitar label_smoothing hará que el modelo se esfuerce más en acertar la clase correcta en vez de repartir confianza difusa.
-    criterion = FocalLoss(gamma=gamma, reduction="mean")
+    #criterion = FocalLoss(gamma=gamma, reduction="mean")
+    # Probamos con CrossEntropyLoss: estable, bien conocida, buena en datasets equilibrados (como el tuyo).
+    # label_smoothing=0.05 suaviza decisiones sin perder foco.
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
 
     train_losses, val_losses, train_accs, val_accs = [], [], [], []
     best_val_loss = float("inf")
@@ -226,8 +229,8 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.pt"))
-            print(f"💾 Guardado mejor modelo fine-tuned en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_finetuned_optimizado.pt')}")
+            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.pt"))
+            print(f"💾 Guardado mejor modelo fine-tuned en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_finetuned_optimizado2.pt')}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -289,26 +292,7 @@ def main(train_loader, val_loader, num_classes, device="cuda", epochs=20, patien
         print("🛑 Debug activo: fine-tuning detenido tras primera época.")
 
     # Export the fine-tuned model to ONNX
-    input_size = (1, 1, 25000)
-    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.onnx")
-    dummy_input = torch.randn(*input_size).to(device)
-
-    # Properly disable compilation for ONNX export
-    decompiled_model = torch._dynamo.disable(model)
-    decompiled_model.eval()
-
-    with torch.no_grad():
-        torch.onnx.export(
-            decompiled_model,
-            dummy_input,
-            onnx_path,
-            export_params=True,
-            opset_version=12,
-            do_constant_folding=True,
-            input_names=["input"],
-            output_names=["output"]
-        )
-    print(f"✅ Modelo fine-tuned exportado a ONNX en: {onnx_path}")
+    export_model_to_onnx(device=device)
 
     return model
 
@@ -343,7 +327,7 @@ def export_model_to_onnx(device="cuda"):
 
     # Inicializa el modelo y carga pesos
     model = AstroConformerClassifier(args, num_classes).to(device)
-    state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.pt"), map_location=device)
+    state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.pt"), map_location=device)
 
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
         print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
@@ -356,7 +340,7 @@ def export_model_to_onnx(device="cuda"):
     dummy_input = (torch.randn(1, 1, 25000).to(device), torch.ones(1, 25000).bool().to(device))  # (x, mask)
 
     # Exportar a ONNX
-    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.onnx")
+    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.onnx")
     with torch.no_grad():
         torch.onnx.export(
             model,

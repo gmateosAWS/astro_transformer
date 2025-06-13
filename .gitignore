@@ -217,5 +217,8 @@ data/train/*
 
 src/fase2/backups/
 
+# Catalogos
+catalogs/
+
 # Proyecto Astroconfonformer completo
 Astroconformer/

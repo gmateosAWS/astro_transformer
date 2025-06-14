@@ -80,14 +80,6 @@ class AstroConformerClassifier(nn.Module):
         out = torch.cat([out, features], dim=1)
         assert torch.isfinite(out).all(), "❌ out contiene NaN después de concat"
 
-        # Validación crítica antes del classifier
-        if not torch.isfinite(out).all():
-            print("❌ El vector combinado contiene NaNs antes del classifier.")
-            print("  Out stats:", out.min().item(), out.max().item(), out.mean().item())
-            raise ValueError("Vector combinado con NaNs")
-
-        print("🔎 Tamaño de entrada al classifier:", out.shape)
-
         logits = self.classifier(self.dropout(out))
         assert torch.isfinite(logits).all(), "❌ logits contiene NaN"
         return logits

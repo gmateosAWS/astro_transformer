@@ -42,7 +42,7 @@ class FocalLoss(nn.Module):
             return focal_loss
 
 class AstroConformerClassifier(nn.Module):
-    def __init__(self, args, num_classes, freeze_encoder=False):
+    def __init__(self, args, num_classes, feature_dim=7, freeze_encoder=False):  # Cambiar feature_dim a 7
         super().__init__()
         self.encoder = AstroConformer(args)
         if freeze_encoder:
@@ -52,13 +52,13 @@ class AstroConformerClassifier(nn.Module):
         #self.classifier = nn.Linear(args.encoder_dim, num_classes)
         # Añadimos un head mas profundo
         self.classifier = nn.Sequential(
-            nn.Linear(args.encoder_dim, 256),
+            nn.Linear(args.encoder_dim + feature_dim, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, args.output_dim)
         )
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, features):
         if x.dim() > 2:
             x = x.view(x.size(0), -1)
         if mask.dim() > 2:
@@ -69,60 +69,31 @@ class AstroConformerClassifier(nn.Module):
         RoPE = self.encoder.pe(out, out.shape[1])
         out = self.encoder.encoder(out, RoPE)
         out = out.mean(dim=1)
+
+        # Validar shapes y contenido antes de concatenar
+        assert torch.isfinite(out).all(), "❌ out contiene NaN antes de concat"
+        assert torch.isfinite(features).all(), "❌ features contiene NaN"
+        assert out.shape[0] == features.shape[0], f"❌ batch_size mismatch: out {out.shape}, features {features.shape}"
+        assert features.shape[1] == 7, f"❌ features debe tener 7 columnas: got {features.shape[1]}"
+
+        # Concatenar features
+        out = torch.cat([out, features], dim=1)
+        assert torch.isfinite(out).all(), "❌ out contiene NaN después de concat"
+
         logits = self.classifier(self.dropout(out))
+        assert torch.isfinite(logits).all(), "❌ logits contiene NaN"
         return logits
 
-def train1(model, loader, optimizer, criterion, device):
-    model.train()
-    total_loss, correct, total = 0, 0, 0
-    for x, y, mask in loader:
-        start = time.time()
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-        mask = mask.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
-
-        # Reparar y limitar valores anómalos en x
-        x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
-        x = torch.clamp(x, min=-5.0, max=5.0)
-        print(f"To device, optimizer y clamp: {time.time() - start:.4f}s")
-        
-        # Forward con autocast (float32 por compatibilidad con AstroConformer)
-        start = time.time()
-        with autocast(dtype=torch.float32):
-            outputs = model(x, mask)
-            loss = criterion(outputs, y)
-        print(f"Forward + loss time: {time.time() - start:.4f}s")
-
-        # Backward
-        start = time.time()
-        #scaler.scale(loss).backward()
-        #scaler.step(optimizer)
-        #scaler.update()
-        loss.backward()
-        optimizer.step()
-        print(f"Backward pass time: {time.time() - start:.4f}s")
-
-        start = time.time()
-        total_loss += loss.detach()                      # ⚠️ sin .item()
-        preds = outputs.argmax(1)
-        correct += (preds == y).sum()                    # ⚠️ sin .item()
-        total += y.size(0)
-        print(f"Sinc pass time: {time.time() - start:.4f}s")
-
-    #return total_loss / len(loader), correct.item() / total
-    return total_loss.item() / len(loader), correct.item() / total  # 👈 solo sincronizas aquí
-
-def train(model, loader, optimizer, criterion, device):
+def train(model, loader, optimizer, criterion, device, epoch):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
     start = time.time()
-    for x, y, mask in loader:
-        #start = time.time()
+    for x, y, mask, features in loader:  # Añadir features al dataloader
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
+        features = features.to(device, non_blocking=True)
 
         optimizer.zero_grad()
 
@@ -133,9 +104,38 @@ def train(model, loader, optimizer, criterion, device):
 
         # Forward + loss con autocast (float16 por defecto en CUDA)
         #start = time.time()
+        #with autocast():
+        #    outputs = model(x, mask, features)  # Pasar features al forward
+        #    loss = criterion(outputs, y)
+        #    assert torch.isfinite(loss), "loss es NaN"
+
         with autocast():
-            outputs = model(x, mask)
+            outputs = model(x, mask, features)  # Pasar features al forward
+
+            # Verifica logits
+            if not torch.isfinite(outputs).all():
+                print(f"❌ [Epoch {epoch}] Logits contienen NaN o Inf")
+                print("  Logits stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
+                print("  Sample logits:", outputs[:3])
+                print("  Labels:", y[:3])
+                raise ValueError("Logits inválidos")
+
+            # Verifica etiquetas
+            if not torch.isfinite(y).all() or (y.min() < 0 or y.max() >= outputs.size(1)):
+                print(f"❌ [Epoch {epoch}] Etiquetas fuera de rango o inválidas: {y}")
+                raise ValueError("Etiquetas fuera de rango")
+
+            # Calcula loss
             loss = criterion(outputs, y)
+
+            # Verifica loss
+            if not torch.isfinite(loss):
+                print(f"❌ [Epoch {epoch}] Loss es NaN o Inf")
+                print("  Loss:", loss)
+                print("  Logits (sample):", outputs[:3])
+                print("  Labels (sample):", y[:3])
+                print("  Class weights:", criterion.weight if hasattr(criterion, 'weight') else "N/A")
+                raise ValueError("Loss inválido")
         #print(f"Forward + loss time: {time.time() - start:.4f}s")
 
         # Backward con GradScaler (evita NaNs y es más rápido en float16)
@@ -159,53 +159,24 @@ def train(model, loader, optimizer, criterion, device):
     #return total_loss / len(loader), correct / total
     return total_loss.item() / len(loader), correct.item() / total
 
-
-@torch.no_grad()
-def evaluate1(model, loader, criterion, device):
-    model.eval()
-    total_loss, correct, total = 0, 0, 0
-    all_preds, all_labels = [], []
-    for x, y, mask in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-        mask = mask.to(device, non_blocking=True)
-
-        # Verificar si los datos contienen NaN
-        #assert not torch.isnan(x).any(), "Datos de entrada contienen NaN"
-        #assert not torch.isnan(y).any(), "Etiquetas contienen NaN"
-
-        with autocast():  # También se usa aquí para coherencia
-            outputs = model(x, mask)
-            loss = criterion(outputs, y)
-
-        total_loss += loss.item()
-        preds = outputs.argmax(1)
-        correct += (preds == y).sum().item()
-        total += y.size(0)
-        all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(y.cpu().numpy())
-
-
-    report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
-    return total_loss / len(loader), correct / total, report
-
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
     start = time.time()
-    for x, y, mask in loader:
+    for x, y, mask, features in loader:  # Añadir features al dataloader
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
+        features = features.to(device, non_blocking=True)
 
         # Reparar y limitar valores anómalos en x
         x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
         x = torch.clamp(x, min=-5.0, max=5.0)
 
         with autocast():  # Consistencia con train()
-            outputs = model(x, mask)
+            outputs = model(x, mask, features)  # Pasar features al forward
             loss = criterion(outputs, y)
 
         total_loss += loss.detach().cpu().item()
@@ -246,11 +217,14 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
         device=device
     )
 
-    model = AstroConformerClassifier(args, num_classes, freeze_encoder=freeze_encoder).to(device)
+    model = AstroConformerClassifier(args, num_classes, feature_dim=7, freeze_encoder=freeze_encoder).to(device)  # Cambiar feature_dim a 7
     model = torch.compile(model)
 
-    class_weights = compute_class_weight("balanced", classes=np.unique([y.item() for _, y, _ in train_loader.dataset]),
-                                         y=[y.item() for _, y, _ in train_loader.dataset])
+    class_weights = compute_class_weight(
+        "balanced",
+        classes=np.unique([y.item() for _, y, _, _ in train_loader.dataset]),  # Ignorar features
+        y=[y.item() for _, y, _, _ in train_loader.dataset]  # Ignorar features
+    )
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
@@ -264,7 +238,7 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
     print("Modelo en:", next(model.parameters()).device)
 
     for epoch in trange(1, epochs + 1 if not debug else 2, desc="Entrenamiento del modelo"):
-        train_loss, train_acc = train(model, train_loader, optimizer, criterion, device)
+        train_loss, train_acc = train(model, train_loader, optimizer, criterion, device, epoch)
         val_loss, val_acc, report = evaluate(model, val_loader, criterion, device)
 
         train_losses.append(train_loss)

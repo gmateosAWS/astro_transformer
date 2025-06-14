@@ -16,6 +16,7 @@ import time
 import sys
 import time
 import sys
+from scipy.stats import skew, kurtosis
 
 # Importar función de normalización de clases
 from src.utils.normalization_dict import normalize_label
@@ -44,6 +45,7 @@ else:
 
 discard_reasons = {
     "all_nan": 0,
+    "all_invalid": 0,
     "low_std": 0,
     "short_curve": 0,
     "nan_or_inf_after_norm": 0,
@@ -55,10 +57,11 @@ MIN_POINTS = 30
 MIN_STD = 1e-4
 
 class LightCurveDataset(Dataset):
-    def __init__(self, sequences, labels, masks):
+    def __init__(self, sequences, labels, masks, features):
         self.sequences = sequences
         self.labels = labels
         self.masks = masks
+        self.features = features
 
     def __len__(self):
         return len(self.sequences)
@@ -68,6 +71,7 @@ class LightCurveDataset(Dataset):
             torch.tensor(self.sequences[idx], dtype=torch.float32),
             torch.tensor(self.labels[idx], dtype=torch.long),
             torch.tensor(self.masks[idx], dtype=torch.float32),
+            torch.tensor(self.features[idx], dtype=torch.float32),
         )
 
 def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path=None, ids_refuerzo=None):
@@ -110,10 +114,6 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
         df_id = find_column(df.columns, "id")
         df_mag = find_column(df.columns, "magnitud")
         df_clase = find_column(df.columns, "clase_variable_normalizada")
-        # Limpiar valores tipo '>23.629' en la columna de magnitud
-        if df_mag is not None:
-            df[df_mag] = df[df_mag].astype(str).str.replace('>', '', regex=False).str.strip()
-            df[df_mag] = pd.to_numeric(df[df_mag], errors='coerce')
         # Limpiar valores tipo '>23.629' en la columna de magnitud
         if df_mag is not None:
             df[df_mag] = df[df_mag].astype(str).str.replace('>', '', regex=False).str.strip()
@@ -168,6 +168,38 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
     return grouped_data
   
   
+# --- NUEVA FUNCIÓN ---
+def compute_aux_features(magnitudes):
+    if len(magnitudes) == 0:
+        return [0.0] * 7
+
+    magnitudes = np.asarray(magnitudes)
+
+    # Cálculo de estadísticas básicas
+    std = float(np.std(magnitudes)) if len(magnitudes) > 1 else 0.0
+    iqr = float(np.percentile(magnitudes, 75) - np.percentile(magnitudes, 25)) if len(magnitudes) > 1 else 0.0
+    amplitude = float(np.max(magnitudes) - np.min(magnitudes)) if len(magnitudes) > 0 else 0.0
+    median = float(np.median(magnitudes)) if len(magnitudes) > 0 else 0.0
+    mad = float(np.median(np.abs(magnitudes - median))) if len(magnitudes) > 1 else 0.0
+
+    # Skewness y kurtosis con clipping
+    skewness = float(skew(magnitudes)) if len(magnitudes) > 2 else 0.0
+    kurt = float(kurtosis(magnitudes)) if len(magnitudes) > 2 else 0.0
+
+    # Reemplazar valores no finitos
+    features = [std, iqr, amplitude, median, mad, skewness, kurt]
+    features = [f if np.isfinite(f) else 0.0 for f in features]
+
+    # Aplicar límites razonables a skewness y kurtosis (clipping conservador)
+    features[5] = np.clip(features[5], -10, 10)   # skewness
+    features[6] = np.clip(features[6], -20, 20)   # kurtosis
+
+    # También puedes aplicar clip a amplitude si esperas picos extremos
+    features[2] = np.clip(features[2], 0, 100)    # amplitude máx razonable
+
+    return features
+
+
 def process_single_curve(group, seq_length, device):
     id_objeto, df = group
     # Usar mapeo robusto de columnas
@@ -181,37 +213,45 @@ def process_single_curve(group, seq_length, device):
     clase = normalize_label(df[clase_col].iloc[0])
     if clase.lower() == "unknown":
         discard_reasons["unknown_class"] += 1
-        return None
-    
-    # Limpiar valores tipo '>23.629' en la columna de magnitud
+        return None, "unknown_class"
+
+    # Extraer y limpiar magnitudes
     magnitudes_str = df[mag_col].astype(str).str.replace('>', '', regex=False).str.strip()
     magnitudes = pd.to_numeric(magnitudes_str, errors='coerce').to_numpy()
-
+    # Validar si todos los valores son NaN o Inf
+    if not np.isfinite(magnitudes).any():
+        return None, "all_invalid"
+    # Calcular mediana solo con los valores finitos
+    med = np.median(magnitudes[np.isfinite(magnitudes)])
+    # Sustituir NaN, +Inf, -Inf por la mediana válida
+    magnitudes = np.nan_to_num(magnitudes, nan=med, posinf=med, neginf=med)
+    
     if clase.lower() == "unknown":
         discard_reasons["unknown_class"] += 1
-        return None
+        return None, "unknown_class"
         
     if np.all(np.isnan(magnitudes)):
-        discard_reasons["all_nan"] += 1
-        return None
-        
+        return None, "all_nan"
+
     if len(magnitudes) < MIN_POINTS:
-        discard_reasons["short_curve"] += 1
-        return None
+        return None, "short_curve"
 
-    magnitudes = np.nan_to_num(magnitudes, nan=np.nanmedian(magnitudes))
     if np.std(magnitudes) < MIN_STD:
-        discard_reasons["low_std"] += 1
-        return None
+        return None, "low_std"
 
-    # Initialize magnitudes_norm before referencing it
+    # Compute auxiliary features
+    features = compute_aux_features(magnitudes)
+
+    # Validar valores NaN o Inf en las características calculadas
+    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Normalize magnitudes
     median = np.median(magnitudes)
     iqr = np.subtract(*np.percentile(magnitudes, [75, 25]))
     magnitudes_norm = (magnitudes - median) / iqr if iqr != 0 else magnitudes - median
 
     if np.isnan(magnitudes_norm).any() or np.isinf(magnitudes_norm).any():
-        discard_reasons["nan_or_inf_after_norm"] += 1
-        return None
+        return None, "nan_or_inf_after_norm"
 
     magnitudes_norm = np.clip(magnitudes_norm, -1000, 1000)
     attention_mask = np.zeros(seq_length)
@@ -221,7 +261,7 @@ def process_single_curve(group, seq_length, device):
     attention_mask[:effective_length] = 1
 
     discard_reasons["ok"] += 1
-    return padded_curve, clase, attention_mask
+    return (padded_curve, clase, attention_mask, features), "ok"
 
 def main(
     seq_length=20000,
@@ -239,7 +279,7 @@ def main(
 
     if max_per_class_override is None:
         max_per_class_override = {}
-
+ 
     ids_refuerzo = set()
     if errores_csv_path:
         errores_df = pd.read_csv(errores_csv_path)
@@ -274,34 +314,79 @@ def main(
     t3 = time.time()
     print(f"\U000023F3 [INFO] Tiempo en procesamiento paralelo: {t3-t2:.1f} segundos", flush=True)
 
+    # Nuevo acumulador
+    discard_reasons = defaultdict(int)
+    processed = []
+
     # Filtrar resultados válidos
     results = [r for r in results if r is not None]
-    filtered = [r for r in results if not (
-        np.isnan(r[0]).any() or np.isinf(r[0]).any() or
-        np.isnan(r[2]).any() or np.isinf(r[2]).any()
-    )]
+    filtered = []
+    for r, reason in results:
+        if r is None:
+            discard_reasons[reason] += 1
+            continue
+        discard_reasons["ok"] += 1
+        try:
+            # Crear una nueva tupla con valores corregidos
+            corrected_r = (
+                np.nan_to_num(np.asarray(r[0]), nan=0.0, posinf=0.0, neginf=0.0),  # sequences
+                r[1],  # label
+                np.nan_to_num(np.asarray(r[2]), nan=0.0, posinf=0.0, neginf=0.0),  # mask
+                np.asarray(r[3])  # features
+            )
+        except Exception as e:
+            print(f"❌ Error al convertir r en batch: {e}")
+            discard_reasons["all_invalid"] += 1
+            continue
+        # Validación final
+        if not (np.isnan(corrected_r[0]).any() or np.isinf(corrected_r[0]).any() or
+                np.isnan(corrected_r[2]).any() or np.isinf(corrected_r[2]).any()):
+            filtered.append(corrected_r)
 
     print(f"\U0001F50B [INFO] Curvas válidas tras filtrado: {len(filtered)}", flush=True)
 
     # Excluir unknown del label_encoder y de las etiquetas
-    sequences, labels, masks = zip(*filtered)
+    sequences, labels, masks, features = zip(*filtered)
     filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
     sequences = [sequences[i] for i in filtered_indices]
     labels = [labels[i] for i in filtered_indices]
     masks = [masks[i] for i in filtered_indices]
+    features = [features[i] for i in filtered_indices]
 
     # Crear label_encoder antes de codificar
     unique_labels = sorted(set(labels))
     label_encoder = {label: idx for idx, label in enumerate(unique_labels)}
     encoded_labels = np.array([label_encoder[label] for label in labels], dtype=np.int32)
 
-    # Convertir a float16 para ahorrar memoria
-    sequences = np.array(sequences, dtype=np.float16)
-    masks = np.array(masks, dtype=np.float16)
+    # Convertir secuencias y máscaras a float16 (ahorro de memoria)
+    #sequences = np.array(sequences, dtype=np.float16)
+    #masks = np.array(masks, dtype=np.float16)
+    sequences = np.array(sequences)
+    masks = np.array(masks)
+    # Convertir y normalizar las características auxiliares en float32
+    # Normalización características auxiliares (Robust Scaler por columna)
+    features = np.array(features, dtype=np.float32)  # Asegura tipo y estructura
+    features_median = np.median(features, axis=0)
+    features_iqr = np.percentile(features, 75, axis=0) - np.percentile(features, 25, axis=0) + 1e-8
+    features = (features - features_median) / features_iqr
+    # Validar valores NaN o Inf en las características normalizadas
+    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+    #features = features.astype(np.float16)
+   
+    # Llamar a la prueba rápida después de generar las características
+    quick_test(features)
+
+    # Guardar features_median y features_iqr en un archivo .pkl
+    features_stats_path = os.path.join(DATA_DIR, "train/features_stats.pkl")
+    os.makedirs(os.path.dirname(features_stats_path), exist_ok=True)
+    with open(features_stats_path, "wb") as f:
+        pickle.dump({"median": features_median, "iqr": features_iqr}, f)
+    print(f"📁 Features median y IQR guardados en: {features_stats_path}")
 
     # Mostrar el uso de memoria de los arrays
     print(f"[INFO] Uso de memoria de sequences: {sequences.nbytes/1024/1024:.2f} MB")
     print(f"[INFO] Uso de memoria de masks: {masks.nbytes/1024/1024:.2f} MB")
+    print(f"[INFO] Uso de memoria de features: {features.nbytes/1024/1024:.2f} MB")
     print(f"[INFO] Uso de memoria de labels: {encoded_labels.nbytes/1024/1024:.2f} MB")
 
     # ADVERTENCIA: El uso de memoria será muy alto con 85k curvas x 25k puntos, incluso en float16 (~40GB solo para sequences)
@@ -345,7 +430,7 @@ def main(
     # División secundaria: train y val dentro del 90% restante
     train_idx, val_idx = train_test_split(
         train_val_idx,
-        test_size=0.2222,  # ≈ 20% del 90% restante = 20% val total
+        test_size=0.2222,  # ≈ 20% del 90% restante = 20% val total    # División inicial: train + val/test
         stratify=encoded_labels[train_val_idx],
         random_state=42
     )
@@ -353,23 +438,29 @@ def main(
     # Asegurar que los IDs de refuerzo están en train
     train_idx = set(train_idx)  # Usar un set para evitar duplicados
     train_idx.update(refuerzo_indices)  # Añadir índices de refuerzo
-    train_idx = np.array(list(train_idx))  # Convertir de nuevo a array
+    train_idx = np.array(list(train_idx))  # Convertir de nuevo a arraytro del 90% restante
 
     # Crear datasets
+    sequences = np.asarray(sequences, dtype=np.float32)
+    masks = np.asarray(masks, dtype=np.float32)
+    features = np.asarray(features, dtype=np.float32)
     train_dataset = LightCurveDataset(
         [sequences[i] for i in train_idx],
         [encoded_labels[i] for i in train_idx],
-        [masks[i] for i in train_idx]
+        [masks[i] for i in train_idx],
+        [features[i] for i in train_idx]  # Incluir características auxiliares
     )
     val_dataset = LightCurveDataset(
         [sequences[i] for i in val_idx],
         [encoded_labels[i] for i in val_idx],
-        [masks[i] for i in val_idx]
+        [masks[i] for i in val_idx],
+        [features[i] for i in val_idx]  # Incluir características auxiliares
     )
     test_dataset = LightCurveDataset(
         [sequences[i] for i in test_idx],
         [encoded_labels[i] for i in test_idx],
-        [masks[i] for i in test_idx]
+        [masks[i] for i in test_idx],
+        [features[i] for i in test_idx]  # Incluir características auxiliares
     )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
@@ -384,9 +475,9 @@ def main(
     # Save datasets in smaller chunks using torch.save
     def save_large_object(obj, filepath):
         torch.save(obj, filepath)
-    save_large_object(train_loader.dataset, os.path.join(DATA_DIR, "train/train_dataset_ref.pt"))
-    save_large_object(val_loader.dataset, os.path.join(DATA_DIR, "train/val_dataset_ref.pt"))
-    save_large_object(test_loader.dataset, os.path.join(DATA_DIR, "train/test_dataset_ref.pt"))
+    save_large_object(train_loader.dataset, os.path.join(DATA_DIR, "train/train_dataset.pt"))
+    save_large_object(val_loader.dataset, os.path.join(DATA_DIR, "train/val_dataset.pt"))
+    save_large_object(test_loader.dataset, os.path.join(DATA_DIR, "train/test_dataset.pt"))
 
     print("\n\U0001F4C9 Resumen de curvas descartadas:")
     for reason, count in discard_reasons.items():
@@ -399,3 +490,16 @@ def main(
     print(f"\U00002705 Datos preparados como secuencias normalizadas y máscaras.")
     print(f"\U000023F3 [INFO] Tiempo total de ejecución: {total_time/60:.2f} minutos ({total_time:.1f} segundos)", flush=True)
     return train_loader, val_loader
+
+def quick_test(features, num_samples=10):
+    """
+    Realiza una prueba rápida en un subconjunto de las características para verificar valores NaN o Inf.
+    """
+    print("\n🔍 Realizando prueba rápida en características auxiliares...")
+    subset = features[:num_samples]
+    for i, feature in enumerate(subset):
+        if np.isnan(feature).any() or np.isinf(feature).any():
+            print(f"⚠️ Valores NaN o Inf detectados en el sample {i}: {feature}")
+        else:
+            print(f"✅ Sample {i} sin problemas: {feature}")
+    print("✅ Prueba rápida completada.")

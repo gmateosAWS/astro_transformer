@@ -1,5 +1,6 @@
 import os
 import torch
+torch.set_float32_matmul_precision('high')  # ✅ Activa uso de Tensor Cores para float32
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -70,17 +71,27 @@ def evaluate(model, loader, criterion, device):
         x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
         x = torch.clamp(x, min=-5.0, max=5.0)
 
-        with autocast():
-            outputs = model(x, mask, features)  # Pasar features al forward
-            loss = criterion(outputs, y)
+        outputs = model(x, mask, features)  # Pasar features al forward
+        outputs = torch.clamp(outputs, min=-10, max=10)  # Añadido para evitar NaNs
 
-        total_loss += loss.detach().cpu().item()
+        loss = criterion(outputs, y)
+
+        if not torch.isfinite(loss):
+            print(f"❌ Epoch {epoch}: Loss inválido")
+            print("  Loss:", loss)
+            print("  Logits (sample):", outputs[:3])
+            print("  Labels (sample):", y[:3])
+            raise ValueError("Loss inválido")
+
+        # total_loss += loss.detach().cpu().item()
+        total_loss += loss.detach()
         all_preds.extend(outputs.argmax(1).detach().cpu().tolist())
         all_labels.extend(y.detach().cpu().tolist())
 
-    return total_loss / len(loader), all_preds, all_labels
+    #return total_loss / len(loader), all_preds, all_labels
+    return total_loss.item() / len(loader), all_preds, all_labels
 
-
+    
 def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optimizado.pt", device="cuda", epochs=20, patience=4, debug=False,
          freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0):
     # Activar optimización de CuDNN
@@ -92,20 +103,19 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
     args = argparse.Namespace(
         input_dim=1,
         in_channels=1,
-        encoder_dim=256,
-        hidden_dim=384,
+        encoder_dim=256, # 192
+        hidden_dim=384, # 256
         output_dim=num_classes,
-        num_heads=8,
+        num_heads=8, # 6,
         num_layers=8,
         dropout=0.3, dropout_p=0.3,
-        stride=20,
+        stride=32,
         kernel_size=3,
         norm="postnorm",
         encoder=["mhsa_pro", "conv", "conv"],
         timeshift=False,
         device=device
     )
-
     model = AstroConformerClassifier(args, num_classes, feature_dim=7, freeze_encoder=freeze_encoder).to(device)  # Cambiar feature_dim a 7
 
     # Carga los pesos del modelo entrenado
@@ -117,7 +127,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
     model.to(device)
-    # ✅ Compilar el modelo para mejorar rendimiento (solo una vez)
+    # Compilar el modelo para mejorar rendimiento (solo una vez)
     model = torch.compile(model)
     print(f"✅ Modelo cargado desde {model_path}")
 
@@ -133,7 +143,8 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
     #criterion = FocalLoss(gamma=gamma, reduction="mean")
     # Probamos con CrossEntropyLoss: estable, bien conocida, buena en datasets equilibrados (como el tuyo).
     # label_smoothing=0.05 suaviza decisiones sin perder foco.
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    #criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    criterion = nn.CrossEntropyLoss()
 
     train_losses, val_losses, train_accs, val_accs = [], [], [], []
     best_val_loss = float("inf")
@@ -157,11 +168,12 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
             print(f"🔓 Encoder descongelado y optimizador actualizado en epoch {epoch}")
 
         t_train = time.time()
-        for i, (x, y, mask) in enumerate(train_loader):
+        for i, (x, y, mask, features) in enumerate(train_loader):
             #batch_start = time.time()
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
+            features = features.to(device, non_blocking=True)
 
             # Reparar y limitar valores anómalos en x
             x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -169,39 +181,45 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
 
             optimizer.zero_grad()
 
-            try:
-                with autocast():
-                    outputs = model(x, mask, features)
-                    loss = criterion(outputs, y)
-            except RuntimeError as e:
-                print(f"⚠️ Error en forward/backward: {e}")
-                torch.cuda.empty_cache()
-                continue
-            #print(f"⏱️ Tiempo batch start: {time.time() - batch_start:.4f}s")
+            outputs = model(x, mask, features)
+            outputs = torch.clamp(outputs, min=-10, max=10)  # clamp logits
 
-            #back_start = time.time()
+            if not torch.isfinite(outputs).all():
+                print(f"❌ Epoch {epoch}: Logits inválidos")
+                print("  Logits stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
+                print("  Sample logits:", outputs[:3])
+                print("  Labels:", y[:3])
+                raise ValueError("Logits inválidos")
+
+            if not torch.isfinite(y).all() or (y.min() < 0 or y.max() >= outputs.size(1)):
+                print(f"❌ Epoch {epoch}: Etiquetas fuera de rango o inválidas: {y}")
+                raise ValueError("Etiquetas fuera de rango")
+
+            loss = criterion(outputs, y)
+
+            if not torch.isfinite(loss):
+                print(f"❌ Epoch {epoch}: Loss inválido")
+                print("  Loss:", loss)
+                raise ValueError("Loss inválido")
+
             loss.backward()
             optimizer.step()
 
             total_loss += loss.detach()
             correct += (outputs.argmax(1) == y).sum()
             total += y.size(0)
-            #print(f"⏱️ Tiempo backward: {time.time() - back_start:.4f}s")
-
-            # 🧹 Liberar fragmentación cada 20 batches
-            #if i % 20 == 0:
-            #    torch.cuda.empty_cache()
 
             torch.cuda.synchronize()
-            #print(f"⏱️ Tiempo batch: {time.time() - start:.4f}s")
 
         if total == 0:
             print(f"⚠️ Epoch {epoch}: no se procesaron muestras. Posible error en el dataloader o en el modelo.")
             train_losses.append(0)
             train_accs.append(0)
             continue
-        train_losses.append(total_loss.cpu().item() / len(train_loader))
-        train_accs.append(correct.cpu().item() / total)
+
+        # Convertimos a escalar al final para guardar resultados
+        train_losses.append(total_loss.item() / len(train_loader))
+        train_accs.append(correct.item() / total)
         print(f"⏱️ Tiempo entrenamiento: {time.time() - t_train:.2f}s")
 
         t_eval = time.time()
@@ -304,14 +322,14 @@ def export_model_to_onnx(device="cuda"):
         num_heads=8,
         num_layers=8,
         dropout=0.3, dropout_p=0.3,
-        stride=20,
+        stride=32,
         kernel_size=3,
         norm="postnorm",
         encoder=["mhsa_pro", "conv", "conv"],
         timeshift=False,
         device=device
     )
-
+    
     # Inicializa el modelo y carga pesos
     model = AstroConformerClassifier(args, num_classes, feature_dim=7).to(device)  # Cambiar feature_dim a 7
     state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.pt"), map_location=device)

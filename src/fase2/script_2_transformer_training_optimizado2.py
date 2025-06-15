@@ -89,71 +89,63 @@ def train(model, loader, optimizer, criterion, device, epoch):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
     start = time.time()
-    for x, y, mask, features in loader:  # Añadir features al dataloader
+
+    for x, y, mask, features in loader:  
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
-        features = features.to(device, non_blocking=True)
+        features = features.to(device, non_blocking=True) # Añadir features al dataloader
 
         optimizer.zero_grad()
 
         # Reparar y limitar valores anómalos en x
         x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
         x = torch.clamp(x, min=-5.0, max=5.0)
-        #print(f"To device, optimizer y clamp: {time.time() - start:.4f}s")
 
-        # Forward + loss con autocast (float16 por defecto en CUDA)
-        #start = time.time()
-        #with autocast():
-        #    outputs = model(x, mask, features)  # Pasar features al forward
-        #    loss = criterion(outputs, y)
-        #    assert torch.isfinite(loss), "loss es NaN"
+        outputs = model(x, mask, features)  # Pasar features al forward
 
-        with autocast():
-            outputs = model(x, mask, features)  # Pasar features al forward
+        # Verifica logits
+        if not torch.isfinite(outputs).all():
+            print(f"❌ [Epoch {epoch}] Logits contienen NaN o Inf")
+            print("  Logits stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
+            print("  Sample logits:", outputs[:3])
+            print("  Labels:", y[:3])
+            raise ValueError("Logits inválidos")
 
-            # Verifica logits
-            if not torch.isfinite(outputs).all():
-                print(f"❌ [Epoch {epoch}] Logits contienen NaN o Inf")
-                print("  Logits stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
-                print("  Sample logits:", outputs[:3])
-                print("  Labels:", y[:3])
-                raise ValueError("Logits inválidos")
+        # Clamp logits solo en Epoch 1 para evitar explosiones numéricas
+        logits = torch.clamp(outputs, min=-10, max=10)
+        #logits = outputs
 
-            # Verifica etiquetas
-            if not torch.isfinite(y).all() or (y.min() < 0 or y.max() >= outputs.size(1)):
-                print(f"❌ [Epoch {epoch}] Etiquetas fuera de rango o inválidas: {y}")
-                raise ValueError("Etiquetas fuera de rango")
+        if not torch.isfinite(logits).all():
+            print(f"❌ [Epoch {epoch}] Logits contienen NaN o Inf")
+            print("  Logits stats:", logits.min().item(), logits.max().item(), logits.mean().item())
+            print("  Sample logits:", logits[:3])
+            print("  Labels:", y[:3])
+            raise ValueError("Logits inválido")
 
-            # Calcula loss
-            loss = criterion(outputs, y)
+        # Verifica etiquetas
+        if not torch.isfinite(y).all() or (y.min() < 0 or y.max() >= logits.size(1)):
+            print(f"❌ [Epoch {epoch}] Etiquetas fuera de rango o inválidas: {y}")
+            raise ValueError("Etiquetas fuera de rango")
 
-            # Verifica loss
-            if not torch.isfinite(loss):
-                print(f"❌ [Epoch {epoch}] Loss es NaN o Inf")
-                print("  Loss:", loss)
-                print("  Logits (sample):", outputs[:3])
-                print("  Labels (sample):", y[:3])
-                print("  Class weights:", criterion.weight if hasattr(criterion, 'weight') else "N/A")
-                raise ValueError("Loss inválido")
-        #print(f"Forward + loss time: {time.time() - start:.4f}s")
+        loss = criterion(logits, y)
 
-        # Backward con GradScaler (evita NaNs y es más rápido en float16)
-        #start = time.time()
-        #scaler.scale(loss).backward()
-        #scaler.step(optimizer)
-        #scaler.update()
+        if not torch.isfinite(loss):
+            print(f"❌ [Epoch {epoch}] Loss es NaN o Inf")
+            print("  Loss:", loss)
+            print("  Logits (sample):", logits[:3])
+            print("  Labels (sample):", y[:3])
+            print("  Class weights:", criterion.weight if hasattr(criterion, 'weight') else "N/A")
+            raise ValueError("Loss inválido")
+
         loss.backward()
         optimizer.step()
-        #print(f"Backward pass ONLY: {time.time() - start:.4f}s")
 
         # Acumulación de métricas sin sincronización
-        #start = time.time()
         # Sin .item() por batch (esto es GPU friendly)
         total_loss += loss.detach()
-        correct += (outputs.argmax(1) == y).sum()
+        correct += (logits.argmax(1) == y).sum()
         total += y.size(0)
-        #print(f"Acumulacion metricas time: {time.time() - start:.4f}s")
 
     print(f"[TRAIN] TIEMPO ÉPOCA: {time.time() - start:.4f}s")
     #return total_loss / len(loader), correct / total
@@ -175,9 +167,32 @@ def evaluate(model, loader, criterion, device):
         x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
         x = torch.clamp(x, min=-5.0, max=5.0)
 
-        with autocast():  # Consistencia con train()
-            outputs = model(x, mask, features)  # Pasar features al forward
-            loss = criterion(outputs, y)
+        outputs = model(x, mask, features)  # Pasar features al forward
+        outputs = torch.clamp(outputs, min=-10, max=10)  # Clamp fijo en evaluación
+
+        # Verifica logits
+        if not torch.isfinite(outputs).all():
+            print(f"❌ [Epoch {epoch}] Logits contienen NaN o Inf")
+            print("  Logits stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
+            print("  Sample logits:", outputs[:3])
+            print("  Labels:", y[:3])
+            raise ValueError("Logits inválidos")
+
+        # Verifica etiquetas
+        if not torch.isfinite(y).all() or (y.min() < 0 or y.max() >= outputs.size(1)):
+            print(f"❌ [Epoch {epoch}] Etiquetas fuera de rango o inválidas: {y}")
+            raise ValueError("Etiquetas fuera de rango")
+
+        loss = criterion(outputs, y)
+
+        # Verifica loss
+        if not torch.isfinite(loss):
+            print(f"❌ [Epoch {epoch}] Loss es NaN o Inf")
+            print("  Loss:", loss)
+            print("  Logits (sample):", outputs[:3])
+            print("  Labels (sample):", y[:3])
+            print("  Class weights:", criterion.weight if hasattr(criterion, 'weight') else "N/A")
+            raise ValueError("Loss inválido")
 
         total_loss += loss.detach().cpu().item()
         preds = outputs.argmax(1)
@@ -187,7 +202,7 @@ def evaluate(model, loader, criterion, device):
         all_labels.extend(y.cpu().numpy())
 
     report = classification_report(all_labels, all_preds, output_dict=True, zero_division=0)
-    print(f"[VAL] TIEMPO ÉPOCA: {time.time() - start:.4f}s")    
+    print(f"[VAL] TIEMPO ÉPOCA: {time.time() - start:.4f}s")
     return total_loss / len(loader), correct / total, report
 
 
@@ -200,16 +215,13 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
     args = argparse.Namespace(
         input_dim=1,
         in_channels=1,
-        #encoder_dim=192,
-        encoder_dim=256,
-        #hidden_dim=256,
-        hidden_dim=384,
+        encoder_dim=256, # 192
+        hidden_dim=384, # 256
         output_dim=num_classes,
-        num_heads=8,
-        #num_layers=6,
+        num_heads=8, # 6,
         num_layers=8,
         dropout=0.3, dropout_p=0.3,
-        stride=20,
+        stride=32, #20
         kernel_size=3,
         norm="postnorm",
         encoder=["mhsa_pro", "conv", "conv"],
@@ -218,13 +230,14 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
     )
 
     model = AstroConformerClassifier(args, num_classes, feature_dim=7, freeze_encoder=freeze_encoder).to(device)  # Cambiar feature_dim a 7
-    model = torch.compile(model)
+    #model = torch.compile(model)
 
     class_weights = compute_class_weight(
         "balanced",
         classes=np.unique([y.item() for _, y, _, _ in train_loader.dataset]),  # Ignorar features
         y=[y.item() for _, y, _, _ in train_loader.dataset]  # Ignorar features
     )
+    print("🔍 Pesos de clase (antes del clip):", class_weights)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
@@ -302,15 +315,20 @@ if __name__ == "__main__":
 
     # Define los argumentos del modelo
     args = argparse.Namespace(
-        input_dim=1, in_channels=1,
-        encoder_dim=192,
-        hidden_dim=256,
-        output_dim=7,  # Numero de clases
-        num_heads=8, num_layers=6,
+        input_dim=1,
+        in_channels=1,
+        encoder_dim=256, # 192
+        hidden_dim=384, # 256
+        output_dim=num_classes,
+        num_heads=8, # 6,
+        num_layers=8,
         dropout=0.3, dropout_p=0.3,
-        stride=20, kernel_size=3,
-        norm="postnorm", encoder=["mhsa_pro", "conv", "conv"],
-        timeshift=False, device="cuda"
+        stride=32, #20
+        kernel_size=3,
+        norm="postnorm",
+        encoder=["mhsa_pro", "conv", "conv"],
+        timeshift=False,
+        device=device
     )
 
     # Instancia el modelo

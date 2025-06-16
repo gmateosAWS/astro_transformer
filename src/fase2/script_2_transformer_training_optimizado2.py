@@ -51,11 +51,19 @@ class AstroConformerClassifier(nn.Module):
         self.dropout = nn.Dropout(p=args.dropout)
 
         # [MOD CNN] Añadimos una CNN 1D previa al extractor
+        # | Capa                      | Propósito                                                 |
+        # | ------------------------- | --------------------------------------------------------- |
+        # | `Conv1d(1 → 8, kernel=7)` | Captura patrones locales más amplios con mayor capacidad. |
+        # | `MaxPool1d(kernel=2)`     | Reduce a mitad la resolución temporal (más robustez).     |
+        # | `Conv1d(8 → 4, kernel=5)` | Aprendizaje intermedio (fusión de patrones).              |
+        # | `Conv1d(4 → 1, kernel=3)` | Reduce a 1 canal para compatibilidad con AstroConformer.  |
         self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=5, padding=2),
+            nn.Conv1d(in_channels=1, out_channels=8, kernel_size=7, padding=3),  # +expresividad
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=2),
-            nn.Conv1d(in_channels=4, out_channels=1, kernel_size=5, padding=2),
+            nn.Conv1d(in_channels=8, out_channels=4, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=4, out_channels=1, kernel_size=3, padding=1),  # Reconduce a 1 canal
             nn.ReLU()
         )
 
@@ -78,14 +86,13 @@ class AstroConformerClassifier(nn.Module):
         x = x.unsqueeze(1)  # [batch_size, 1, seq_length]
 
         # [MOD CNN] Aplicamos CNN 1D antes del extractor
-        x = self.cnn(x)
-
-        if self.training and x_cnn.shape[0] == 1:  # Mostrar solo en primer batch
+        x_cnn = self.cnn(x)  # <- guarda el resultado para debug
+        if self.training and x_cnn.shape[0] == 1:
             print("✅ CNN aplicada: shape tras conv+pool:", x_cnn.shape)
+        x = x_cnn  # continúa con el flujo normal
 
-        # Extracción con el AstroConformer congelado o no
-        # out = self.encoder.extractor(x.unsqueeze(1))
-        out = self.encoder.extractor(x)  # No modificar esta línea
+        # Extracción con el AstroConformer
+        out = self.encoder.extractor(x)
         out = out.permute(0, 2, 1)
         RoPE = self.encoder.pe(out, out.shape[1])
         out = self.encoder.encoder(out, RoPE)
@@ -104,6 +111,7 @@ class AstroConformerClassifier(nn.Module):
         logits = self.classifier(self.dropout(out))
         assert torch.isfinite(logits).all(), "❌ logits contiene NaN"
         return logits
+
 
 # === DATA AUGMENTATION ===
 def apply_augmentation(

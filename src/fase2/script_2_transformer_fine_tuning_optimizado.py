@@ -93,7 +93,7 @@ def evaluate(model, loader, criterion, device):
 
     
 def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optimizado.pt", device="cuda", epochs=20, patience=4, debug=False,
-         freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0):
+         freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0, use_scheduler=True):
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
 
@@ -108,7 +108,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
         output_dim=num_classes,
         num_heads=8, # 6,
         num_layers=8,
-        dropout=0.3, dropout_p=0.3,
+        dropout=0.4, dropout_p=0.4,
         stride=32,
         kernel_size=3,
         norm="postnorm",
@@ -135,6 +135,16 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
         {"params": model.encoder.parameters(), "lr": encoder_lr},
         {"params": model.classifier.parameters(), "lr": head_lr}
     ], weight_decay=1e-4)
+
+    scheduler = None
+    if use_scheduler:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',         # minimizar val_loss
+            factor=0.5,         # reduce LR a la mitad
+            patience=3,         # espera 3 epochs sin mejora
+            min_lr=1e-7         # no baja de este valor
+        )
 
     #criterion = FocalLoss(gamma=gamma, reduction="mean", label_smoothing=0.1)
     # El label_smoothing=0.1 puede estar difuminando las etiquetas reales, afectando a la capacidad del modelo de tomar decisiones claras. 
@@ -209,7 +219,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
             correct += (outputs.argmax(1) == y).sum()
             total += y.size(0)
 
-            torch.cuda.synchronize()
+            #torch.cuda.synchronize()
 
         if total == 0:
             print(f"⚠️ Epoch {epoch}: no se procesaron muestras. Posible error en el dataloader o en el modelo.")
@@ -227,6 +237,10 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
         val_losses.append(val_loss)
         val_accs.append(accuracy_score(val_true, val_preds))
         print(f"🔍 Tiempo evaluación: {time.time() - t_eval:.2f}s")
+
+        # Añadir scheduler.step(val_loss)
+        if use_scheduler and scheduler is not None:
+            scheduler.step(val_loss)
 
         print(f"\n🧪 Epoch {epoch}/{epochs}")
         print(f"Train loss: {train_losses[-1]:.4f}, Val loss: {val_loss:.4f}")
@@ -321,7 +335,7 @@ def export_model_to_onnx(device="cuda"):
         output_dim=num_classes,
         num_heads=8,
         num_layers=8,
-        dropout=0.3, dropout_p=0.3,
+        dropout=0.4, dropout_p=0.4,
         stride=32,
         kernel_size=3,
         norm="postnorm",

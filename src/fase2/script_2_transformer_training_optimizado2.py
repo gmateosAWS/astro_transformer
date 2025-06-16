@@ -42,15 +42,25 @@ class FocalLoss(nn.Module):
             return focal_loss
 
 class AstroConformerClassifier(nn.Module):
-    def __init__(self, args, num_classes, feature_dim=7, freeze_encoder=False):  # Cambiar feature_dim a 7
+    def __init__(self, args, num_classes, feature_dim=7, freeze_encoder=False):
         super().__init__()
         self.encoder = AstroConformer(args)
         if freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
         self.dropout = nn.Dropout(p=args.dropout)
+
+        # [MOD CNN] Añadimos una CNN 1D previa al extractor
+        self.cnn = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(in_channels=4, out_channels=1, kernel_size=5, padding=2),
+            nn.ReLU()
+        )
+
+        # Clasificador denso
         #self.classifier = nn.Linear(args.encoder_dim, num_classes)
-        # Añadimos un head mas profundo
         self.classifier = nn.Sequential(
             nn.Linear(args.encoder_dim + feature_dim, 256),
             nn.ReLU(),
@@ -63,20 +73,31 @@ class AstroConformerClassifier(nn.Module):
             x = x.view(x.size(0), -1)
         if mask.dim() > 2:
             mask = mask.view(mask.size(0), -1)
-        x = x * mask
-        out = self.encoder.extractor(x.unsqueeze(1))
+
+        x = x * mask  # Aplica máscara de validez
+        x = x.unsqueeze(1)  # [batch_size, 1, seq_length]
+
+        # [MOD CNN] Aplicamos CNN 1D antes del extractor
+        x = self.cnn(x)
+
+        if self.training and x_cnn.shape[0] == 1:  # Mostrar solo en primer batch
+            print("✅ CNN aplicada: shape tras conv+pool:", x_cnn.shape)
+
+        # Extracción con el AstroConformer congelado o no
+        # out = self.encoder.extractor(x.unsqueeze(1))
+        out = self.encoder.extractor(x)  # No modificar esta línea
         out = out.permute(0, 2, 1)
         RoPE = self.encoder.pe(out, out.shape[1])
         out = self.encoder.encoder(out, RoPE)
         out = out.mean(dim=1)
 
-        # Validar shapes y contenido antes de concatenar
+        # Validaciones de integridad
         assert torch.isfinite(out).all(), "❌ out contiene NaN antes de concat"
         assert torch.isfinite(features).all(), "❌ features contiene NaN"
         assert out.shape[0] == features.shape[0], f"❌ batch_size mismatch: out {out.shape}, features {features.shape}"
         assert features.shape[1] == 7, f"❌ features debe tener 7 columnas: got {features.shape[1]}"
 
-        # Concatenar features
+        # Concatenación y clasificación
         out = torch.cat([out, features], dim=1)
         assert torch.isfinite(out).all(), "❌ out contiene NaN después de concat"
 
@@ -85,7 +106,14 @@ class AstroConformerClassifier(nn.Module):
         return logits
 
 # === DATA AUGMENTATION ===
-def apply_augmentation(x, modes=["gaussian", "jitter", "masking"], p=0.5, sigma=0.02, jitter_shift=20, mask_len=200):
+def apply_augmentation(
+    x,
+    modes=["gaussian", "jitter", "masking", "scaling", "offset", "flipping", "window_dropout"],
+    p=0.4,
+    sigma=0.01,
+    jitter_shift=100,
+    mask_len=500,
+):
     """
     Aplica una secuencia de transformaciones de data augmentation sobre la curva x.
     - x: tensor [batch_size, seq_length]
@@ -110,10 +138,23 @@ def apply_augmentation(x, modes=["gaussian", "jitter", "masking"], p=0.5, sigma=
                         start = torch.randint(0, x_aug.size(1) - mask_len, (1,)).item()
                         x_aug[i, start:start + mask_len] = 0.0
 
-            # Puedes añadir más transformaciones aquí si lo deseas
+            elif mode == "scaling":
+                scale = torch.empty(x_aug.size(0), 1, device=x_aug.device).uniform_(0.9, 1.1)
+                x_aug *= scale
 
+            elif mode == "offset":
+                offset = torch.empty(x_aug.size(0), 1, device=x_aug.device).uniform_(-0.05, 0.05)
+                x_aug += offset
+
+            elif mode == "flipping":
+                x_aug = torch.flip(x_aug, dims=[1])
+
+            elif mode == "window_dropout":
+                for i in range(x_aug.size(0)):
+                    for _ in range(5):
+                        start = torch.randint(0, x_aug.size(1) - 50, (1,)).item()
+                        x_aug[i, start:start + 50] = 0.0
     return x_aug
-
 
 
 def train(model, loader, optimizer, criterion, device, epoch):
@@ -128,14 +169,15 @@ def train(model, loader, optimizer, criterion, device, epoch):
         features = features.to(device, non_blocking=True) # Añadir features al dataloader
 
         # === AUGMENTATION === aplicar solo en entrenamiento
-        x = apply_augmentation(
-            x,
-            modes=["gaussian", "jitter", "masking"],  # Tres transformaciones moderadas
-            p=0.4,           # Probabilidad individual de aplicar cada una (40%)
-            sigma=0.01,      # Ruido gaussiano leve (1% de la escala normalizada)
-            jitter_shift=100,  # Desplazamiento máximo de 100 puntos (0.4% del total)
-            mask_len=500       # Bloque a enmascarar de hasta 500 puntos (2%)
-        )
+        # === AUGMENTATION === aplicar solo en entrenamiento
+        # x = apply_augmentation(
+        #     x,
+        #     modes=["gaussian", "jitter", "masking"],  # Tres transformaciones moderadas
+        #     p=0.4,           # Probabilidad individual de aplicar cada una (40%)
+        #     sigma=0.01,      # Ruido gaussiano leve (1% de la escala normalizada)
+        #     jitter_shift=100,  # Desplazamiento máximo de 100 puntos (0.4% del total)
+        #     mask_len=500       # Bloque a enmascarar de hasta 500 puntos (2%)
+        # )
 
         optimizer.zero_grad()
 
@@ -272,6 +314,8 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
 
     model = AstroConformerClassifier(args, num_classes, feature_dim=7, freeze_encoder=freeze_encoder).to(device)  # Cambiar feature_dim a 7
     #model = torch.compile(model)
+
+    print(model)
 
     class_weights = compute_class_weight(
         "balanced",

@@ -84,6 +84,37 @@ class AstroConformerClassifier(nn.Module):
         assert torch.isfinite(logits).all(), "❌ logits contiene NaN"
         return logits
 
+# === DATA AUGMENTATION ===
+def apply_augmentation(x, modes=["gaussian", "jitter", "masking"], p=0.5, sigma=0.02, jitter_shift=20, mask_len=200):
+    """
+    Aplica una secuencia de transformaciones de data augmentation sobre la curva x.
+    - x: tensor [batch_size, seq_length]
+    - modes: lista de strings con augmentations a aplicar ("gaussian", "jitter", "masking")
+    - p: probabilidad total de aplicar cada transformación (independiente por modo)
+    """
+    x_aug = x.clone()
+
+    for mode in modes:
+        if torch.rand(1).item() < p:
+            if mode == "gaussian":
+                noise = torch.randn_like(x_aug) * sigma
+                x_aug += noise
+
+            elif mode == "jitter":
+                shift = torch.randint(low=-jitter_shift, high=jitter_shift + 1, size=(1,)).item()
+                x_aug = torch.roll(x_aug, shifts=shift, dims=1)
+
+            elif mode == "masking":
+                for i in range(x_aug.size(0)):
+                    if x_aug.size(1) > mask_len + 1:
+                        start = torch.randint(0, x_aug.size(1) - mask_len, (1,)).item()
+                        x_aug[i, start:start + mask_len] = 0.0
+
+            # Puedes añadir más transformaciones aquí si lo deseas
+
+    return x_aug
+
+
 
 def train(model, loader, optimizer, criterion, device, epoch):
     model.train()
@@ -95,6 +126,16 @@ def train(model, loader, optimizer, criterion, device, epoch):
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
         features = features.to(device, non_blocking=True) # Añadir features al dataloader
+
+        # === AUGMENTATION === aplicar solo en entrenamiento
+        x = apply_augmentation(
+            x,
+            modes=["gaussian", "jitter", "masking"],  # Tres transformaciones moderadas
+            p=0.4,           # Probabilidad individual de aplicar cada una (40%)
+            sigma=0.01,      # Ruido gaussiano leve (1% de la escala normalizada)
+            jitter_shift=100,  # Desplazamiento máximo de 100 puntos (0.4% del total)
+            mask_len=500       # Bloque a enmascarar de hasta 500 puntos (2%)
+        )
 
         optimizer.zero_grad()
 

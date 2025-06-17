@@ -60,9 +60,9 @@ class AstroConformerClassifier(nn.Module):
 def evaluate(model, loader, criterion, device):
     model.eval()
     total_loss = 0
-    all_preds, all_labels = [], []
+    all_preds, all_labels, all_ids = [], [], []
 
-    for x, y, mask, features in loader:  # Añadir features al dataloader
+    for x, y, mask, features, id_obj in loader:  # Añadir features e IDs al dataloader
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
@@ -87,11 +87,11 @@ def evaluate(model, loader, criterion, device):
         total_loss += loss.detach()
         all_preds.extend(outputs.argmax(1).detach().cpu().tolist())
         all_labels.extend(y.detach().cpu().tolist())
+        all_ids.extend(id_obj)  # id_obj ya está en string o int
 
     #return total_loss / len(loader), all_preds, all_labels
-    return total_loss.item() / len(loader), all_preds, all_labels
+    return total_loss.item() / len(loader), all_preds, all_labels, all_ids
 
-    
 def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optimizado.pt", device="cuda", epochs=20, patience=4, debug=False,
          freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0, use_scheduler=True):
     # Activar optimización de CuDNN

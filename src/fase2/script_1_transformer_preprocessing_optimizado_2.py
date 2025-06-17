@@ -57,11 +57,12 @@ MIN_POINTS = 30
 MIN_STD = 1e-4
 
 class LightCurveDataset(Dataset):
-    def __init__(self, sequences, labels, masks, features):
+    def __init__(self, sequences, labels, masks, features, ids):
         self.sequences = sequences
         self.labels = labels
         self.masks = masks
         self.features = features
+        self.ids = ids  # ← nuevo
 
     def __len__(self):
         return len(self.sequences)
@@ -72,6 +73,7 @@ class LightCurveDataset(Dataset):
             torch.tensor(self.labels[idx], dtype=torch.long),
             torch.tensor(self.masks[idx], dtype=torch.float32),
             torch.tensor(self.features[idx], dtype=torch.float32),
+            self.ids[idx]  # ← nuevo
         )
 
 def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path=None, ids_refuerzo=None):
@@ -303,6 +305,9 @@ def main(
     grouped_list = list(grouped_data.items())
     random.shuffle(grouped_list)
 
+    # Guardar IDs de objetos para referencia posterior
+    id_objetos = [id_obj for id_obj, _ in grouped_list]
+
     print(f"\U0001F680 Procesando {len(grouped_list)} curvas en paralelo usando {num_workers} CPUs...", flush=True)
     t2 = time.time()
     # Procesar curvas en paralelo
@@ -316,7 +321,7 @@ def main(
 
     # Nuevo acumulador
     discard_reasons = defaultdict(int)
-    processed = []
+    #processed = []
 
     # Filtrar resultados válidos
     results = [r for r in results if r is not None]
@@ -359,8 +364,8 @@ def main(
     encoded_labels = np.array([label_encoder[label] for label in labels], dtype=np.int32)
 
     # Convertir secuencias y máscaras a float16 (ahorro de memoria)
-    #sequences = np.array(sequences, dtype=np.float16)
-    #masks = np.array(masks, dtype=np.float16)
+    # sequences = np.array(sequences, dtype=np.float16)
+    # masks = np.array(masks, dtype=np.float16)
     sequences = np.array(sequences)
     masks = np.array(masks)
     # Convertir y normalizar las características auxiliares en float32
@@ -372,7 +377,7 @@ def main(
     # Validar valores NaN o Inf en las características normalizadas
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
     #features = features.astype(np.float16)
-   
+
     # Llamar a la prueba rápida después de generar las características
     quick_test(features)
 
@@ -412,7 +417,7 @@ def main(
         "clase_variable": labels,
         "clase_codificada": encoded_labels
     })
-    df_debug.to_csv("data/train/debug_clases_codificadas.csv", index=False)
+    df_debug.to_csv(os.path.join(DATA_DIR, "train/debug_clases_codificadas.csv"), index=False)
 
     print(f"\U0001F4DD [INFO] Realizando split train/val/test...", flush=True)
 
@@ -448,19 +453,22 @@ def main(
         [sequences[i] for i in train_idx],
         [encoded_labels[i] for i in train_idx],
         [masks[i] for i in train_idx],
-        [features[i] for i in train_idx]  # Incluir características auxiliares
+        [features[i] for i in train_idx],  # Incluir características auxiliares
+        [id_objetos[i] for i in train_idx]
     )
     val_dataset = LightCurveDataset(
         [sequences[i] for i in val_idx],
         [encoded_labels[i] for i in val_idx],
         [masks[i] for i in val_idx],
-        [features[i] for i in val_idx]  # Incluir características auxiliares
+        [features[i] for i in val_idx],  # Incluir características auxiliares
+        [id_objetos[i] for i in val_idx]
     )
     test_dataset = LightCurveDataset(
         [sequences[i] for i in test_idx],
         [encoded_labels[i] for i in test_idx],
         [masks[i] for i in test_idx],
-        [features[i] for i in test_idx]  # Incluir características auxiliares
+        [features[i] for i in test_idx],  # Incluir características auxiliares
+        [id_objetos[i] for i in test_idx]
     )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
@@ -484,7 +492,7 @@ def main(
         print(f"\U0001F538 {reason.replace('_', ' ').capitalize():30}: {count}")
 
     pd.DataFrame(discard_reasons.items(), columns=["motivo", "cantidad"]).to_csv(
-        os.path.join(OUTPUTS_DIR, "debug_descartes.csv"), index=False
+        os.path.join(DATA_DIR, "train/debug_descartes.csv"), index=False
     )
     total_time = time.time() - global_start
     print(f"\U00002705 Datos preparados como secuencias normalizadas y máscaras.")

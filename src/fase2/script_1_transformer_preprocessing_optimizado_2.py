@@ -412,8 +412,10 @@ def main(
         name = [k for k, v in label_encoder.items() if v == label][0]
         print(f"{label:>2} ({name}): {count}")
 
+    # Filtrar también los IDs con los mismos índices válidos
+    id_objetos_filtrados = [id_objetos[i] for i in filtered_indices]
     df_debug = pd.DataFrame({
-        "id": list(grouped_data.keys())[:len(labels)],
+        "id": id_objetos_filtrados,
         "clase_variable": labels,
         "clase_codificada": encoded_labels
     })

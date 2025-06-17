@@ -57,15 +57,15 @@ class AstroConformerClassifier(nn.Module):
         # | `MaxPool1d(kernel=2)`     | Reduce a mitad la resolución temporal (más robustez).     |
         # | `Conv1d(8 → 4, kernel=5)` | Aprendizaje intermedio (fusión de patrones).              |
         # | `Conv1d(4 → 1, kernel=3)` | Reduce a 1 canal para compatibilidad con AstroConformer.  |
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=8, kernel_size=7, padding=3),  # +expresividad
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2),
-            nn.Conv1d(in_channels=8, out_channels=4, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=4, out_channels=1, kernel_size=3, padding=1),  # Reconduce a 1 canal
-            nn.ReLU()
-        )
+        # self.cnn = nn.Sequential(
+        #     nn.Conv1d(in_channels=1, out_channels=8, kernel_size=7, padding=3),  # +expresividad
+        #     nn.ReLU(),
+        #     nn.MaxPool1d(kernel_size=2),
+        #     nn.Conv1d(in_channels=8, out_channels=4, kernel_size=5, padding=2),
+        #     nn.ReLU(),
+        #     nn.Conv1d(in_channels=4, out_channels=1, kernel_size=3, padding=1),  # Reconduce a 1 canal
+        #     nn.ReLU()
+        # )
 
         # Clasificador denso
         #self.classifier = nn.Linear(args.encoder_dim, num_classes)
@@ -86,10 +86,11 @@ class AstroConformerClassifier(nn.Module):
         x = x.unsqueeze(1)  # [batch_size, 1, seq_length]
 
         # [MOD CNN] Aplicamos CNN 1D antes del extractor
-        x_cnn = self.cnn(x)  # <- guarda el resultado para debug
-        if self.training and x_cnn.shape[0] == 1:
-            print("✅ CNN aplicada: shape tras conv+pool:", x_cnn.shape)
-        x = x_cnn  # continúa con el flujo normal
+        # x_cnn = self.cnn(x)  # <- guarda el resultado para debug
+        # if self.training and not hasattr(self, '_printed_cnn_info'):
+        #     print("✅ CNN aplicada: shape tras conv+pool:", x_cnn.shape)
+        #     self._printed_cnn_info = True
+        # x = x_cnn  # continúa con el flujo normal
 
         # Extracción con el AstroConformer
         out = self.encoder.extractor(x)

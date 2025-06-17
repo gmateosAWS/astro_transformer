@@ -233,7 +233,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
         print(f"⏱️ Tiempo entrenamiento: {time.time() - t_train:.2f}s")
 
         t_eval = time.time()
-        val_loss, val_preds, val_true = evaluate(model, val_loader, criterion, device)
+        val_loss, val_preds, val_true, val_ids = evaluate(model, val_loader, criterion, device)
         val_losses.append(val_loss)
         val_accs.append(accuracy_score(val_true, val_preds))
         print(f"🔍 Tiempo evaluación: {time.time() - t_eval:.2f}s")
@@ -293,6 +293,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
         if pred != true:
             errores.append({
                 "indice": idx,
+                "id": val_ids[idx],
                 "clase_real": class_names[true],
                 "clase_predicha": class_names[pred]
             })

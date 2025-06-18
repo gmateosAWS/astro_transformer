@@ -76,7 +76,7 @@ class LightCurveDataset(Dataset):
             self.ids[idx]  # ← nuevo
         )
 
-def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path=None, ids_refuerzo=None):
+def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_class_override=None, batch_size=128, cache_path=None, ids_refuerzo=None, ids_a_excluir=None):
     # Set default cache_path using DATA_DIR
     if cache_path is None:
         cache_path = os.path.join(DATA_DIR, "train/grouped_data.pkl")
@@ -122,6 +122,11 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
             df[df_mag] = pd.to_numeric(df[df_mag], errors='coerce')
         df["id"] = df[df_id].astype(str)
         for id_obj, group in df.groupby("id"):
+            # Excluir IDs si están en la lista de exclusión
+            if ids_a_excluir and id_obj in ids_a_excluir:
+                discard_reasons["removed_class"] += 1
+                continue
+            
             clase = group[df_clase].iloc[0]
             # Crear y normalizar clase_norm
             clase_norm = normalize_label(clase)
@@ -274,19 +279,46 @@ def main(
     device="cpu",
     max_per_class=None,
     max_per_class_override=None,
-    errores_csv_path=None
+    errores_csv_path=None,
+    filtrar_curvas_malas=None
 ):
     print("\U0001F4C2 Cargando datos en lotes con PyArrow...", flush=True)
     global_start = time.time()
 
     if max_per_class_override is None:
         max_per_class_override = {}
- 
+
     ids_refuerzo = set()
     if errores_csv_path:
         errores_df = pd.read_csv(errores_csv_path)
         ids_refuerzo = set(errores_df["indice"].astype(str))
         print(f"\U0001F4C2 [INFO] IDs de refuerzo cargados: {len(ids_refuerzo)}")
+
+    # --- NUEVO: Filtrado de curvas malas ---
+    ids_a_excluir = set()
+    ids_a_excluir_por_clase = {}
+    if filtrar_curvas_malas:
+        df_malas = pd.read_csv(filtrar_curvas_malas)
+        ids_a_excluir = set(df_malas["id_objeto"].astype(str))
+        # Contar por clase original
+        ids_a_excluir_por_clase = df_malas.groupby("clase_original")["id_objeto"].nunique().to_dict()
+        print(f"\U0001F4C2 [INFO] IDs a excluir por filtrado: {len(ids_a_excluir)}")
+        print(f"\U0001F4C2 [INFO] Exclusiones por clase: {ids_a_excluir_por_clase}")
+
+        # Ajustar límites de clase
+        if max_per_class_override:
+            for clase, n_excluir in ids_a_excluir_por_clase.items():
+                if clase in max_per_class_override and max_per_class_override[clase] is not None:
+                    nuevo_limite = max(0, max_per_class_override[clase] - n_excluir)
+                    print(f"   - Ajustando max_per_class_override[{clase}] de {max_per_class_override[clase]} a {nuevo_limite}")
+                    max_per_class_override[clase] = nuevo_limite
+        elif max_per_class is not None:
+            # Si no hay override, solo hay un límite global
+            total_excluir = sum(ids_a_excluir_por_clase.values())
+            if max_per_class is not None:
+                nuevo_limite = max(0, max_per_class - total_excluir)
+                print(f"   - Ajustando max_per_class de {max_per_class} a {nuevo_limite}")
+                max_per_class = nuevo_limite
 
     # --- Agrupación de datos ---
     t0 = time.time()
@@ -296,7 +328,8 @@ def main(
         max_per_class_override=max_per_class_override,
         batch_size=parquet_batch_size,
         cache_path=os.path.join(DATA_DIR, "train/grouped_data.pkl"),
-        ids_refuerzo=ids_refuerzo
+        ids_refuerzo=ids_refuerzo,
+        ids_a_excluir=ids_a_excluir if ids_a_excluir else None
     )
     t1 = time.time()
     print(f"\U000023F3 [INFO] Tiempo en agrupación de datos: {t1-t0:.1f} segundos", flush=True)

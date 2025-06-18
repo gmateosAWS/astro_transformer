@@ -126,7 +126,7 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
             if ids_a_excluir and id_obj in ids_a_excluir:
                 discard_reasons["removed_class"] += 1
                 continue
-            
+
             clase = group[df_clase].iloc[0]
             # Crear y normalizar clase_norm
             clase_norm = normalize_label(clase)
@@ -173,8 +173,8 @@ def load_and_group_batches(DATASET_PATHS, max_per_class_global=None, max_per_cla
         pickle.dump(grouped_data, f)
     print(f"\U0001F4BE [INFO] Agrupación guardada en cache: {cache_path}", flush=True)
     return grouped_data
-  
-  
+
+
 # --- NUEVA FUNCIÓN ---
 def compute_aux_features(magnitudes):
     if len(magnitudes) == 0:
@@ -232,11 +232,10 @@ def process_single_curve(group, seq_length, device):
     med = np.median(magnitudes[np.isfinite(magnitudes)])
     # Sustituir NaN, +Inf, -Inf por la mediana válida
     magnitudes = np.nan_to_num(magnitudes, nan=med, posinf=med, neginf=med)
-    
+
     if clase.lower() == "unknown":
-        discard_reasons["unknown_class"] += 1
         return None, "unknown_class"
-        
+
     if np.all(np.isnan(magnitudes)):
         return None, "all_nan"
 
@@ -267,7 +266,6 @@ def process_single_curve(group, seq_length, device):
     padded_curve[:effective_length] = magnitudes_norm[:effective_length]
     attention_mask[:effective_length] = 1
 
-    discard_reasons["ok"] += 1
     return (padded_curve, clase, attention_mask, features), "ok"
 
 def main(
@@ -287,7 +285,7 @@ def main(
 
     if max_per_class_override is None:
         max_per_class_override = {}
-
+ 
     ids_refuerzo = set()
     if errores_csv_path:
         errores_df = pd.read_csv(errores_csv_path)
@@ -304,21 +302,6 @@ def main(
         ids_a_excluir_por_clase = df_malas.groupby("clase_original")["id_objeto"].nunique().to_dict()
         print(f"\U0001F4C2 [INFO] IDs a excluir por filtrado: {len(ids_a_excluir)}")
         print(f"\U0001F4C2 [INFO] Exclusiones por clase: {ids_a_excluir_por_clase}")
-
-        # Ajustar límites de clase
-        if max_per_class_override:
-            for clase, n_excluir in ids_a_excluir_por_clase.items():
-                if clase in max_per_class_override and max_per_class_override[clase] is not None:
-                    nuevo_limite = max(0, max_per_class_override[clase] - n_excluir)
-                    print(f"   - Ajustando max_per_class_override[{clase}] de {max_per_class_override[clase]} a {nuevo_limite}")
-                    max_per_class_override[clase] = nuevo_limite
-        elif max_per_class is not None:
-            # Si no hay override, solo hay un límite global
-            total_excluir = sum(ids_a_excluir_por_clase.values())
-            if max_per_class is not None:
-                nuevo_limite = max(0, max_per_class - total_excluir)
-                print(f"   - Ajustando max_per_class de {max_per_class} a {nuevo_limite}")
-                max_per_class = nuevo_limite
 
     # --- Agrupación de datos ---
     t0 = time.time()
@@ -364,14 +347,18 @@ def main(
             discard_reasons[reason] += 1
             continue
         discard_reasons["ok"] += 1
-        # Crear una nueva tupla con valores corregidos
-        corrected_r = (
-            np.nan_to_num(np.asarray(r[0]), nan=0.0, posinf=0.0, neginf=0.0),  # sequences
-            r[1],  # label
-            np.nan_to_num(np.asarray(r[2]), nan=0.0, posinf=0.0, neginf=0.0),  # mask
-            np.asarray(r[3]),  # features
-            r[4] if len(r) > 4 else None  # id_objeto si está disponible
-        )
+        try:
+            # Crear una nueva tupla con valores corregidos
+            corrected_r = (
+                np.nan_to_num(np.asarray(r[0]), nan=0.0, posinf=0.0, neginf=0.0),  # sequences
+                r[1],  # label
+                np.nan_to_num(np.asarray(r[2]), nan=0.0, posinf=0.0, neginf=0.0),  # mask
+                np.asarray(r[3])  # features
+            )
+        except Exception as e:
+            print(f"❌ Error al convertir r en batch: {e}")
+            discard_reasons["all_invalid"] += 1
+            continue
         # Validación final
         if not (np.isnan(corrected_r[0]).any() or np.isinf(corrected_r[0]).any() or
                 np.isnan(corrected_r[2]).any() or np.isinf(corrected_r[2]).any()):
@@ -379,14 +366,35 @@ def main(
 
     print(f"\U0001F50B [INFO] Curvas válidas tras filtrado: {len(filtered)}", flush=True)
 
+    ##################################################################
+    ##################################################################
     # Excluir unknown del label_encoder y de las etiquetas
-    sequences, labels, masks, features, ids = zip(*filtered)
-    filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
-    sequences = [sequences[i] for i in filtered_indices]
-    labels = [labels[i] for i in filtered_indices]
-    masks = [masks[i] for i in filtered_indices]
-    features = [features[i] for i in filtered_indices]
-    ids = [ids[i] for i in filtered_indices]
+    # sequences, labels, masks, features = zip(*filtered)
+    # filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
+    # sequences = [sequences[i] for i in filtered_indices]
+    # labels = [labels[i] for i in filtered_indices]
+    # masks = [masks[i] for i in filtered_indices]
+    # features = [features[i] for i in filtered_indices]
+    # Filtrar también los IDs con los mismos índices válidos
+    # id_objetos_filtrados = [id_objetos[i] for i in filtered_indices]
+
+    # 🆕 Versión robusta: unimos datos y eliminamos etiquetas "unknown"
+    filtered = [(seq, label, mask, feat, id_objetos[i]) for i, (seq, label, mask, feat) in enumerate(filtered)]
+    filtered = [(seq, label, mask, feat, id_obj) for (seq, label, mask, feat, id_obj) in filtered if str(label).lower() != "unknown"]
+    # Separar las listas finales ya filtradas
+    sequences, labels, masks, features, id_objetos_filtrados = zip(*filtered)
+
+    #############################
+    # Verificación interna inmediata después del filtrado
+    assert len(sequences) == len(labels) == len(masks) == len(features) == len(id_objetos_filtrados), \
+        f"❌ Longitudes desiguales tras filtrado: {len(sequences)}, {len(labels)}, {len(masks)}, {len(features)}, {len(id_objetos_filtrados)}"
+    # Muestra un par de ejemplos aleatorios para verificar coherencia
+    print("🔎 Ejemplos aleatorios después del filtrado final:")
+    for _ in range(5):
+        idx = random.randint(0, len(sequences) - 1)
+        print(f"ID: {id_objetos_filtrados[idx]}, Clase: {labels[idx]}")
+    ##################################################################
+    ##################################################################
 
     # Crear label_encoder antes de codificar
     unique_labels = sorted(set(labels))
@@ -442,8 +450,6 @@ def main(
         name = [k for k, v in label_encoder.items() if v == label][0]
         print(f"{label:>2} ({name}): {count}")
 
-    # Filtrar también los IDs con los mismos índices válidos
-    id_objetos_filtrados = [ids[i] for i in range(len(ids))]
     df_debug = pd.DataFrame({
         "id": id_objetos_filtrados,
         "clase_variable": labels,
@@ -486,21 +492,21 @@ def main(
         [encoded_labels[i] for i in train_idx],
         [masks[i] for i in train_idx],
         [features[i] for i in train_idx],  # Incluir características auxiliares
-        [ids[i] for i in train_idx]
+        [id_objetos[i] for i in train_idx]
     )
     val_dataset = LightCurveDataset(
         [sequences[i] for i in val_idx],
         [encoded_labels[i] for i in val_idx],
         [masks[i] for i in val_idx],
         [features[i] for i in val_idx],  # Incluir características auxiliares
-        [ids[i] for i in val_idx]
+        [id_objetos[i] for i in val_idx]
     )
     test_dataset = LightCurveDataset(
         [sequences[i] for i in test_idx],
         [encoded_labels[i] for i in test_idx],
         [masks[i] for i in test_idx],
         [features[i] for i in test_idx],  # Incluir características auxiliares
-        [ids[i] for i in test_idx]
+        [id_objetos[i] for i in test_idx]
     )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
@@ -542,9 +548,4 @@ def quick_test(features, num_samples=10):
             print(f"⚠️ Valores NaN o Inf detectados en el sample {i}: {feature}")
         else:
             print(f"✅ Sample {i} sin problemas: {feature}")
-    print("✅ Prueba rápida completada.")
-    if np.isnan(feature).any() or np.isinf(feature).any():
-        print(f"⚠️ Valores NaN o Inf detectados en el sample {i}: {feature}")
-    else:
-        print(f"✅ Sample {i} sin problemas: {feature}")
     print("✅ Prueba rápida completada.")

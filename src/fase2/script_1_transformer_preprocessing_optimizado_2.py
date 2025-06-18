@@ -364,18 +364,14 @@ def main(
             discard_reasons[reason] += 1
             continue
         discard_reasons["ok"] += 1
-        try:
-            # Crear una nueva tupla con valores corregidos
-            corrected_r = (
-                np.nan_to_num(np.asarray(r[0]), nan=0.0, posinf=0.0, neginf=0.0),  # sequences
-                r[1],  # label
-                np.nan_to_num(np.asarray(r[2]), nan=0.0, posinf=0.0, neginf=0.0),  # mask
-                np.asarray(r[3])  # features
-            )
-        except Exception as e:
-            print(f"❌ Error al convertir r en batch: {e}")
-            discard_reasons["all_invalid"] += 1
-            continue
+        # Crear una nueva tupla con valores corregidos
+        corrected_r = (
+            np.nan_to_num(np.asarray(r[0]), nan=0.0, posinf=0.0, neginf=0.0),  # sequences
+            r[1],  # label
+            np.nan_to_num(np.asarray(r[2]), nan=0.0, posinf=0.0, neginf=0.0),  # mask
+            np.asarray(r[3]),  # features
+            r[4] if len(r) > 4 else None  # id_objeto si está disponible
+        )
         # Validación final
         if not (np.isnan(corrected_r[0]).any() or np.isinf(corrected_r[0]).any() or
                 np.isnan(corrected_r[2]).any() or np.isinf(corrected_r[2]).any()):
@@ -384,12 +380,13 @@ def main(
     print(f"\U0001F50B [INFO] Curvas válidas tras filtrado: {len(filtered)}", flush=True)
 
     # Excluir unknown del label_encoder y de las etiquetas
-    sequences, labels, masks, features = zip(*filtered)
+    sequences, labels, masks, features, ids = zip(*filtered)
     filtered_indices = [i for i, label in enumerate(labels) if str(label).lower() != "unknown"]
     sequences = [sequences[i] for i in filtered_indices]
     labels = [labels[i] for i in filtered_indices]
     masks = [masks[i] for i in filtered_indices]
     features = [features[i] for i in filtered_indices]
+    ids = [ids[i] for i in filtered_indices]
 
     # Crear label_encoder antes de codificar
     unique_labels = sorted(set(labels))
@@ -446,7 +443,7 @@ def main(
         print(f"{label:>2} ({name}): {count}")
 
     # Filtrar también los IDs con los mismos índices válidos
-    id_objetos_filtrados = [id_objetos[i] for i in filtered_indices]
+    id_objetos_filtrados = [ids[i] for i in range(len(ids))]
     df_debug = pd.DataFrame({
         "id": id_objetos_filtrados,
         "clase_variable": labels,
@@ -489,21 +486,21 @@ def main(
         [encoded_labels[i] for i in train_idx],
         [masks[i] for i in train_idx],
         [features[i] for i in train_idx],  # Incluir características auxiliares
-        [id_objetos[i] for i in train_idx]
+        [ids[i] for i in train_idx]
     )
     val_dataset = LightCurveDataset(
         [sequences[i] for i in val_idx],
         [encoded_labels[i] for i in val_idx],
         [masks[i] for i in val_idx],
         [features[i] for i in val_idx],  # Incluir características auxiliares
-        [id_objetos[i] for i in val_idx]
+        [ids[i] for i in val_idx]
     )
     test_dataset = LightCurveDataset(
         [sequences[i] for i in test_idx],
         [encoded_labels[i] for i in test_idx],
         [masks[i] for i in test_idx],
         [features[i] for i in test_idx],  # Incluir características auxiliares
-        [id_objetos[i] for i in test_idx]
+        [ids[i] for i in test_idx]
     )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
@@ -545,4 +542,9 @@ def quick_test(features, num_samples=10):
             print(f"⚠️ Valores NaN o Inf detectados en el sample {i}: {feature}")
         else:
             print(f"✅ Sample {i} sin problemas: {feature}")
+    print("✅ Prueba rápida completada.")
+    if np.isnan(feature).any() or np.isinf(feature).any():
+        print(f"⚠️ Valores NaN o Inf detectados en el sample {i}: {feature}")
+    else:
+        print(f"✅ Sample {i} sin problemas: {feature}")
     print("✅ Prueba rápida completada.")

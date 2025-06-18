@@ -171,7 +171,12 @@ def train(model, loader, optimizer, criterion, device, epoch):
     total_loss, correct, total = 0.0, 0, 0
     start = time.time()
 
-    for x, y, mask, features in loader:  
+    for batch in loader:
+        # Adaptar para aceptar datasets con o sin IDs
+        if len(batch) == 5:
+            x, y, mask, features, _ = batch  # Ignorar IDs en entrenamiento
+        else:
+            x, y, mask, features = batch
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
@@ -249,7 +254,12 @@ def evaluate(model, loader, criterion, device):
     total_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
     start = time.time()
-    for x, y, mask, features in loader:  # Añadir features al dataloader
+    for batch in loader:
+        # Adaptar para aceptar datasets con o sin IDs
+        if len(batch) == 5:
+            x, y, mask, features, _ = batch  # Ignorar IDs en evaluación
+        else:
+            x, y, mask, features = batch
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
@@ -326,10 +336,14 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
 
     print(model)
 
+    # Adaptar para datasets con o sin IDs (5 elementos si incluye IDs)
+    def get_label_from_sample(sample):
+        return sample[1]
+
     class_weights = compute_class_weight(
         "balanced",
-        classes=np.unique([y.item() for _, y, _, _ in train_loader.dataset]),  # Ignorar features
-        y=[y.item() for _, y, _, _ in train_loader.dataset]  # Ignorar features
+        classes=np.unique([get_label_from_sample(sample).item() for sample in train_loader.dataset]),
+        y=[get_label_from_sample(sample).item() for sample in train_loader.dataset]
     )
     print("🔍 Pesos de clase (antes del clip):", class_weights)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)

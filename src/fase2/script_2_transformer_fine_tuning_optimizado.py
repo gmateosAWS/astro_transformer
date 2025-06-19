@@ -96,7 +96,8 @@ def main(
     train_loader,
     val_loader,
     label_encoder,
-    model_name="mejor_modelo_finetuned_optimizado.pt",
+    model_name_in="mejor_modelo_optimizado.pt",
+    model_name_out=None,
     device="cuda",
     epochs=20,
     patience=4,
@@ -132,26 +133,29 @@ def main(
     )
     model = AstroConformerClassifier(args, num_classes, feature_dim=7, freeze_encoder=freeze_encoder).to(device)  # Cambiar feature_dim a 7
 
-    # --- Salidas personalizadas ---
-    model_path = os.path.join(OUTPUTS_DIR, model_name)
-    base_name = os.path.splitext(model_name)[0]
+    # --- Determinar nombres de archivos ---
+    if model_name_out is None:
+        name, ext = os.path.splitext(model_name_in)
+        model_name_out = f"{name}_fine_tuned{ext}"
+
+    model_path_in = os.path.join(OUTPUTS_DIR, model_name_in)
+    model_path_out = os.path.join(OUTPUTS_DIR, model_name_out)
+    base_name = os.path.splitext(model_name_out)[0]
     curves_path = os.path.join(OUTPUTS_DIR, f"{base_name}_graficas.png")
     confusion_path = os.path.join(OUTPUTS_DIR, f"{base_name}_matriz_confusion.png")
     errores_csv_path = os.path.join(OUTPUTS_DIR, f"{base_name}_errores_clasificacion.csv")
     report_csv_path = os.path.join(OUTPUTS_DIR, f"{base_name}_class_report.csv")
     onnx_path = os.path.join(OUTPUTS_DIR, f"{base_name}.onnx")
 
-    # Carga los pesos del modelo entrenado
-    state_dict = torch.load(model_path, map_location=device)    
-    # Si el modelo fue compilado, puede tener prefijo _orig_mod.
+    # Carga los pesos del modelo base para fine-tuning
+    state_dict = torch.load(model_path_in, map_location=device)
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
         print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
     model.to(device)
-    # Compilar el modelo para mejorar rendimiento (solo una vez)
     model = torch.compile(model)
-    print(f"✅ Modelo cargado desde {model_path}")
+    print(f"✅ Modelo base cargado desde {model_path_in}")
 
     optimizer = optim.AdamW([
         {"params": model.encoder.parameters(), "lr": encoder_lr},
@@ -270,8 +274,8 @@ def main(
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), model_path)
-            print(f"💾 Guardado mejor modelo fine-tuned en {model_path}")
+            torch.save(model.state_dict(), model_path_out)
+            print(f"💾 Guardado mejor modelo fine-tuned en {model_path_out}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -333,8 +337,7 @@ def main(
     if debug:
         print("🛑 Debug activo: fine-tuning detenido tras primera época.")
 
-    # Export the fine-tuned model to ONNX
-    export_model_to_onnx(model_path=model_path, onnx_path=onnx_path, device=device)
+    export_model_to_onnx(model_path=model_path_out, onnx_path=onnx_path, device=device)
 
     return model
 

@@ -107,14 +107,15 @@ def main(
     encoder_lr=2e-6,
     head_lr=1e-5,
     gamma=3.0,
-    use_scheduler=True
+    use_scheduler=True,
+    scheduler_patience=3
 ):
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
 
     num_classes = len(label_encoder)
     class_names = list(label_encoder.keys())
-    
+
     args = argparse.Namespace(
         input_dim=1,
         in_channels=1,
@@ -168,7 +169,7 @@ def main(
             optimizer,
             mode='min',         # minimizar val_loss
             factor=0.5,         # reduce LR a la mitad
-            patience=3,         # espera 3 epochs sin mejora
+            patience=scheduler_patience,  # espera n epochs sin mejora
             min_lr=1e-7         # no baja de este valor
         )
 
@@ -204,7 +205,14 @@ def main(
             print(f"🔓 Encoder descongelado y optimizador actualizado en epoch {epoch}")
 
         t_train = time.time()
-        for i, (x, y, mask, features) in enumerate(train_loader):
+        #for i, (x, y, mask, features) in enumerate(train_loader):
+        for batch in train_loader:
+            # Adaptar para aceptar datasets con o sin IDs
+            if len(batch) == 5:
+                x, y, mask, features, _ = batch  # Ignorar IDs en entrenamiento
+            else:
+                x, y, mask, features = batch
+
             #batch_start = time.time()
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)

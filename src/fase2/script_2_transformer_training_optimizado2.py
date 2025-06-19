@@ -308,7 +308,18 @@ def evaluate(model, loader, criterion, device):
     return total_loss / len(loader), correct / total, report
 
 
-def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3e-5, freeze_encoder=False, patience=6, debug=False):
+def main(
+    train_loader,
+    val_loader,
+    label_encoder,
+    device="cuda",
+    epochs=50,
+    lr=3e-5,
+    freeze_encoder=False,
+    patience=6,
+    debug=False,
+    model_name="mejor_modelo_optimizado.pt"  # Nuevo argumento opcional
+):
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
 
@@ -358,6 +369,12 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
 
     print("Modelo en:", next(model.parameters()).device)
 
+    # --- Salidas personalizadas ---
+    model_path = os.path.join(OUTPUTS_DIR, model_name)
+    base_name = os.path.splitext(model_name)[0]
+    curves_path = os.path.join(OUTPUTS_DIR, f"{base_name}_graficas.png")
+    report_csv_path = os.path.join(OUTPUTS_DIR, f"{base_name}_class_report.csv")
+
     for epoch in trange(1, epochs + 1 if not debug else 2, desc="Entrenamiento del modelo"):
         train_loss, train_acc = train(model, train_loader, optimizer, criterion, device, epoch)
         val_loss, val_acc, report = evaluate(model, val_loader, criterion, device)
@@ -374,8 +391,8 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt"))
-            print(f"💾 Guardado modelo mejorado en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_optimizado.pt')}")
+            torch.save(model.state_dict(), model_path)
+            print(f"💾 Guardado modelo mejorado en {model_path}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -400,14 +417,13 @@ def main(train_loader, val_loader, label_encoder, device="cuda", epochs=50, lr=3
     plt.ylabel("Accuracy")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUTS_DIR, "curvas_entrenamiento_optimizado2.png"))
+    plt.savefig(curves_path)
     plt.show()
 
     # Print and save the classification report
     print("\n📊 Classification Report:")
     print(report)
     report_df = pd.DataFrame(report).transpose()
-    report_csv_path = os.path.join(OUTPUTS_DIR, "classification_report.csv")
     report_df.to_csv(report_csv_path, index=True)
     print(f"📁 Reporte guardado en: {report_csv_path}")
 
@@ -420,6 +436,17 @@ if __name__ == "__main__":
     # Load label_encoder from file
     with open(os.path.join(DATA_DIR, "train/label_encoder.pkl"), "rb") as f:
         label_encoder = pickle.load(f)
+
+    # --- Definir nombre del modelo desde argumentos de línea de comandos ---
+    import sys
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="mejor_modelo_optimizado.pt", help="Nombre del archivo para guardar el modelo")
+    args_cli, _ = parser.parse_known_args()
+    model_name = args_cli.model_name
+
+    # --- Definir num_classes y device ---
+    num_classes = len(label_encoder)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define los argumentos del modelo
     args = argparse.Namespace(
@@ -440,7 +467,7 @@ if __name__ == "__main__":
     )
 
     # Instancia el modelo
-    model = AstroConformerClassifier(args, num_classes=9).to("cuda")
+    model = AstroConformerClassifier(args, num_classes=num_classes).to(device)
 
     # Carga los pesos del modelo entrenado
-    model.load_state_dict(torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt")))
+    model.load_state_dict(torch.load(os.path.join(OUTPUTS_DIR, model_name)))

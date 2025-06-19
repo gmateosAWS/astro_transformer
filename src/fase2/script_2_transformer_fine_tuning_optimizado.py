@@ -92,8 +92,22 @@ def evaluate(model, loader, criterion, device):
     #return total_loss / len(loader), all_preds, all_labels
     return total_loss.item() / len(loader), all_preds, all_labels, all_ids
 
-def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optimizado.pt", device="cuda", epochs=20, patience=4, debug=False,
-         freeze_encoder=True, freeze_epochs=5, encoder_lr=2e-6, head_lr=1e-5, gamma=3.0, use_scheduler=True):
+def main(
+    train_loader,
+    val_loader,
+    label_encoder,
+    model_name="mejor_modelo_finetuned_optimizado.pt",
+    device="cuda",
+    epochs=20,
+    patience=4,
+    debug=False,
+    freeze_encoder=True,
+    freeze_epochs=5,
+    encoder_lr=2e-6,
+    head_lr=1e-5,
+    gamma=3.0,
+    use_scheduler=True
+):
     # Activar optimización de CuDNN
     torch.backends.cudnn.benchmark = True
 
@@ -118,8 +132,16 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
     )
     model = AstroConformerClassifier(args, num_classes, feature_dim=7, freeze_encoder=freeze_encoder).to(device)  # Cambiar feature_dim a 7
 
-    # Carga los pesos del modelo entrenado
+    # --- Salidas personalizadas ---
     model_path = os.path.join(OUTPUTS_DIR, model_name)
+    base_name = os.path.splitext(model_name)[0]
+    curves_path = os.path.join(OUTPUTS_DIR, f"{base_name}_graficas.png")
+    confusion_path = os.path.join(OUTPUTS_DIR, f"{base_name}_matriz_confusion.png")
+    errores_csv_path = os.path.join(OUTPUTS_DIR, f"{base_name}_errores_clasificacion.csv")
+    report_csv_path = os.path.join(OUTPUTS_DIR, f"{base_name}_class_report.csv")
+    onnx_path = os.path.join(OUTPUTS_DIR, f"{base_name}.onnx")
+
+    # Carga los pesos del modelo entrenado
     state_dict = torch.load(model_path, map_location=device)    
     # Si el modelo fue compilado, puede tener prefijo _orig_mod.
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
@@ -248,8 +270,8 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.pt"))
-            print(f"💾 Guardado mejor modelo fine-tuned en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_finetuned_optimizado2.pt')}")
+            torch.save(model.state_dict(), model_path)
+            print(f"💾 Guardado mejor modelo fine-tuned en {model_path}")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -276,7 +298,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUTS_DIR, "curvas_finetuning_optimizado.png"))
+    plt.savefig(curves_path)
     plt.show()
 
     cm = confusion_matrix(val_true, val_preds, labels=sorted(set(val_true) | set(val_preds)))
@@ -285,7 +307,7 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
     disp.plot(xticks_rotation=45, cmap="Blues")
     plt.title("Matriz de Confusión (Fine-tuning)")
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUTS_DIR, "matriz_confusion_finetuning_optimizado.png"))
+    plt.savefig(confusion_path)
     plt.show()
 
     errores = []
@@ -299,24 +321,24 @@ def main(train_loader, val_loader, label_encoder, model_name="mejor_modelo_optim
             })
 
     df_errores = pd.DataFrame(errores)
-    df_errores.to_csv(os.path.join(OUTPUTS_DIR, "errores_mal_clasificados.csv"), index=False)
-    print(f"💾 Guardado CSV con errores: {os.path.join(OUTPUTS_DIR, 'errores_mal_clasificados.csv')}")
+    df_errores.to_csv(errores_csv_path, index=False)
+    print(f"💾 Guardado CSV con errores: {errores_csv_path}")
 
     report = classification_report(val_true, val_preds, target_names=class_names, output_dict=True, zero_division=0)
     df_report = pd.DataFrame(report).transpose()
-    df_report.to_csv(os.path.join(OUTPUTS_DIR, "class_report_finetuning_optimizado.csv"))
-    print("📄 Reporte de clasificación guardado en class_report_finetuning_optimizado.csv")
+    df_report.to_csv(report_csv_path)
+    print(f"📄 Reporte de clasificación guardado en {report_csv_path}")
 
 
     if debug:
         print("🛑 Debug activo: fine-tuning detenido tras primera época.")
 
     # Export the fine-tuned model to ONNX
-    export_model_to_onnx(device=device)
+    export_model_to_onnx(model_path=model_path, onnx_path=onnx_path, device=device)
 
     return model
 
-def export_model_to_onnx(device="cuda"):
+def export_model_to_onnx(model_path=None, onnx_path=None, device="cuda"):
     """
     Exporta el modelo fine-tuned al formato ONNX para su visualización y despliegue.
     """
@@ -347,7 +369,9 @@ def export_model_to_onnx(device="cuda"):
     
     # Inicializa el modelo y carga pesos
     model = AstroConformerClassifier(args, num_classes, feature_dim=7).to(device)  # Cambiar feature_dim a 7
-    state_dict = torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.pt"), map_location=device)
+    if model_path is None:
+        model_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.pt")
+    state_dict = torch.load(model_path, map_location=device)
 
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
         print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
@@ -364,7 +388,8 @@ def export_model_to_onnx(device="cuda"):
     )
 
     # Exportar a ONNX
-    onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado2.onnx")
+    if onnx_path is None:
+        onnx_path = os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.onnx")
     with torch.no_grad():
         torch.onnx.export(
             model,

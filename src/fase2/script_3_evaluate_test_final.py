@@ -1,115 +1,194 @@
-import os
-import time
 import torch
-from torch import nn, optim
-from torch.cuda.amp import autocast, GradScaler
-from sklearn.metrics import accuracy_score
-from tqdm import trange
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+import numpy as np
+import pickle
+import matplotlib.pyplot as plt
+import pandas as pd
+from pathlib import Path
+import argparse
 
-from src.utils.focal_loss import FocalLoss
-from src.fase2.model import AstroConformerClassifier
-from src.fase2.evaluate import evaluate
-from src.utils.directories import OUTPUTS_DIR
+from src.fase2.script_2_transformer_fine_tuning_optimizado import AstroConformerClassifier
 
-def main(train_loader, val_loader, num_classes, device="cuda", epochs=30, patience=5, debug=False,
-         freeze_encoder=True, freeze_epochs=5, encoder_lr=1e-6, head_lr=5e-6, gamma=3):
 
-    model = AstroConformerClassifier(num_classes=num_classes).to(device)
-    model.load_state_dict(torch.load(os.path.join(OUTPUTS_DIR, "mejor_modelo_optimizado.pt"), map_location=device))
-    print(f"✅ Modelo cargado desde {os.path.join(OUTPUTS_DIR, 'mejor_modelo_optimizado.pt')}")
-    print(f"Modelo en: {device}")
+def evaluate_model_test(
+    test_loader: DataLoader,
+    model,
+    label_encoder,
+    model_name_in: str,
+    output_dir: str = "../outputs/evaluacion_test"
+):
+    # Crear directorio de salida si no existe
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Inicialmente congela el encoder
-    if freeze_encoder:
-        for param in model.encoder.parameters():
-            param.requires_grad = False
+    # Extraer solo el nombre base del modelo (sin path ni extensión)
+    model_name_base = Path(model_name_in).stem
 
-    optimizer = optim.AdamW([
-        {"params": model.encoder.parameters(), "lr": encoder_lr},
-        {"params": model.classifier.parameters(), "lr": head_lr}
-    ], weight_decay=1e-4)
+    model.eval()
 
-    scaler = GradScaler()
-    criterion = FocalLoss(gamma=gamma, reduction="mean", label_smoothing=0.1)
+    y_true, y_pred = [], []
+    all_ids = []
 
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
+    # Predicción sobre datos de test
+    with torch.no_grad():
+        for batch in test_loader:
+            # Soporta datasets con o sin features adicionales
 
-    train_losses, val_losses = [], []
-    train_accs, val_accs = [], []
+            if len(batch) == 5:
+                x_batch, y_batch, mask_batch, features, ids = batch
+            elif len(batch) == 4:
+                x_batch, y_batch, mask_batch, features = batch
+                ids = None
+            elif len(batch) == 3:
+                x_batch, y_batch, mask_batch = batch
+                features = None
+                ids = None
+            elif len(batch) == 2:
+                x_batch, y_batch = batch
+                mask_batch = None
+                features = None
+                ids = None
+            else:
+                raise ValueError(f"Formato de batch no soportado: longitud {len(batch)}")
 
-    for epoch in trange(1, epochs + 1 if not debug else 2, desc="Fine-tuning"):
-        model.train()
-        total_loss, correct, total = 0, 0, 0
-        epoch_start = time.time()
+            x_batch = x_batch.to(next(model.parameters()).device)
+            mask_batch = mask_batch.to(next(model.parameters()).device)
+            if features is not None:
+                features = features.to(next(model.parameters()).device)
+                logits = model(x_batch, mask_batch, features)
+            else:
+                logits = model(x_batch, mask_batch)
+            preds = logits.argmax(dim=1).cpu().numpy()
+            y_true.extend(y_batch.numpy())
+            y_pred.extend(preds)
+            all_ids.extend(ids if ids is not None else [""] * y_batch.shape[0])
 
-        if freeze_encoder and epoch == freeze_epochs:
-            for param in model.encoder.parameters():
-                param.requires_grad = True
-            optimizer = optim.AdamW([
-                {"params": model.encoder.parameters(), "lr": encoder_lr},
-                {"params": model.classifier.parameters(), "lr": head_lr}
-            ], weight_decay=1e-4)
-            print(f"🔓 Encoder descongelado y optimizador actualizado en epoch {epoch}")
 
-        for x, y, mask in train_loader:
-            start = time.time()
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            mask = mask.to(device, non_blocking=True)
-
-            x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
-            x = torch.clamp(x, min=-5.0, max=5.0)
-
-            optimizer.zero_grad()
-
-            with autocast():
-                outputs = model(x, mask)
-                loss = criterion(outputs, y)
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            total_loss += loss.detach().cpu().item()
-            correct += (outputs.argmax(1) == y).sum().item()
-            total += y.size(0)
-
-            torch.cuda.synchronize()
-            print(f"⏱️ Tiempo batch: {time.time() - start:.4f}s")
-
-        if total == 0:
-            print(f"⚠️ Epoch {epoch}: no se procesaron muestras. Posible error en el dataloader o en el modelo.")
-            train_losses.append(0)
-            train_accs.append(0)
-            continue
-
-        train_losses.append(total_loss / len(train_loader))
-        train_accs.append(correct / total)
-
-        eval_start = time.time()
-        val_loss, val_preds, val_true = evaluate(model, val_loader, criterion, device)
-        torch.cuda.synchronize()
-        print(f"🔍 Tiempo evaluación: {time.time() - eval_start:.2f}s")
-
-        val_losses.append(val_loss)
-        val_accs.append(accuracy_score(val_true, val_preds))
-
-        print(f"\n🧪 Epoch {epoch}/{epochs}")
-        print(f"Train loss: {train_losses[-1]:.4f}, Val loss: {val_loss:.4f}")
-        print(f"Train acc: {train_accs[-1]:.4f}, Val acc: {val_accs[-1]:.4f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(OUTPUTS_DIR, "mejor_modelo_finetuned_optimizado.pt"))
-            print(f"💾 Guardado mejor modelo fine-tuned en {os.path.join(OUTPUTS_DIR, 'mejor_modelo_finetuned_optimizado.pt')}")
-            epochs_no_improve = 0
+    # Obtener nombres de clase
+    if hasattr(label_encoder, "classes_"):
+        class_names = label_encoder.classes_
+    elif isinstance(label_encoder, dict):
+        # Si es un dict {clase: idx} o {idx: clase}
+        if all(isinstance(k, int) for k in label_encoder.keys()):
+            # idx -> clase
+            class_names = [label_encoder[i] for i in range(len(label_encoder))]
         else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
-                print(f"⏹️ Fine-tuning detenido tras {patience} épocas sin mejora.")
-                break
+            # clase -> idx
+            inv = {v: k for k, v in label_encoder.items()}
+            class_names = [inv[i] for i in range(len(inv))]
+    else:
+        raise ValueError("label_encoder no reconocido")
 
-        print(f"⏱️ Tiempo total entrenamiento: {time.time() - epoch_start:.2f}s")
+    # Classification report
+    report_dict = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+    report_df = pd.DataFrame(report_dict).transpose()
 
-    return model
+    report_csv_path = output_dir / f"{model_name_base}_test_class_report.csv"
+    report_df.to_csv(report_csv_path, index=True)
+
+    # Confusion Matrix
+    conf_matrix = confusion_matrix(y_true, y_pred)
+
+    conf_matrix_csv_path = output_dir / f"{model_name_base}_test_confusion_matrix.csv"
+    pd.DataFrame(conf_matrix, index=class_names, columns=class_names).to_csv(conf_matrix_csv_path)
+
+    plt.figure(figsize=(10, 8))
+    ConfusionMatrixDisplay(conf_matrix, display_labels=class_names).plot(cmap="Blues", xticks_rotation="vertical")
+    plt.title(f"Matriz de Confusión ({model_name_base})")
+    plt.savefig(output_dir / f"{model_name_base}_test_confusion_matrix.png", bbox_inches='tight')
+    plt.close()
+
+    # Reconstruir la lista de clases a partir del dict
+    if isinstance(label_encoder, dict):
+        idx_to_class = {v: k for k, v in label_encoder.items()}
+        class_list = np.array([idx_to_class[i] for i in range(len(idx_to_class))])
+    else:
+        # Si fuera un LabelEncoder real
+        class_list = label_encoder.classes_
+    
+    # Construir DataFrame con predicciones
+    df = pd.DataFrame({
+        "id": all_ids,
+        "y_true": class_list[y_true],
+        "y_pred": class_list[y_pred],
+        "y_true_encoded": y_true,
+        "y_pred_encoded": y_pred
+    })
+
+    pred_csv_path = output_dir / f"{model_name_base}_test_predictions.csv"
+    df.to_csv(pred_csv_path, index=False)
+
+    print("Evaluación completada. Resultados guardados en:", output_dir)
+    return report_df
+
+
+def main(
+    test_loader,
+    label_encoder,
+    model_name_in,
+    device="cuda",
+    output_dir="../outputs/evaluacion_test",
+):
+    # --- Definir num_classes y argumentos del modelo igual que en entrenamiento ---
+    num_classes = len(label_encoder)
+    args = argparse.Namespace(
+        input_dim=1,
+        in_channels=1,
+        encoder_dim=256,
+        hidden_dim=384,
+        output_dim=num_classes,
+        num_heads=8,
+        num_layers=8,
+        dropout=0.3, dropout_p=0.3,
+        stride=32,
+        kernel_size=3,
+        norm="postnorm",
+        encoder=["mhsa_pro", "conv", "conv"],
+        timeshift=False,
+        device=device
+    )
+    model = AstroConformerClassifier(args, num_classes, feature_dim=7).to(device)
+
+    state_dict = torch.load(model_name_in, map_location=device)
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("⚠️ Detected _orig_mod. prefix in state_dict. Stripping prefixes...")
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    return evaluate_model_test(
+        test_loader=test_loader,
+        model=model,
+        label_encoder=label_encoder,
+        model_name_in=model_name_in,
+        output_dir=output_dir
+    )
+
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Carga de dataset
+    test_dataset = torch.load("../data/processed/test_dataset.pt")
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+
+    # Cargar label_encoder desde archivo
+    import pickle
+    with open("../data/processed/label_encoder.pkl", "rb") as f:
+        label_encoder = pickle.load(f)
+
+    # Importa tu clase y argumentos del modelo aquí
+    # from ... import AstroConformerClassifier
+    # args = ( ... )  # argumentos necesarios para instanciar el modelo
+
+    # main(
+    #     test_loader=test_loader,
+    #     label_encoder=label_encoder,
+    #     model_class=AstroConformerClassifier,
+    #     model_args=args,
+    #     model_path="../outputs/mejor_modelo_optimizado_YSO_curated_fine_tuned.pt",
+    #     model_name_in="mejor_modelo_optimizado_YSO_curated_fine_tuned.pt",
+    #     output_dir="../outputs/evaluacion_test",
+    #     device=device
+    # )
+    # )
